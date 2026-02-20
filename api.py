@@ -72,7 +72,6 @@ app = FastAPI(
 
 # --- Define Pydantic Models for Input ---
 class TunnelCreateRequest(BaseModel):
-    stunnel_id: str
     src_region: str
     src_agent: str
     src_port: str
