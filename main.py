@@ -2,6 +2,8 @@ import logging
 
 from pycrescolib.clientlib import clientlib
 import configparser
+from stunnel_cadl import StunnelCADL
+from stunnel_direct import StunnelDirect
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
