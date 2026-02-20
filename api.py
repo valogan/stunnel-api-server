@@ -159,29 +159,62 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     return {"message": f"Tunnel {stunnel_id} created successfully.", "data": response}
 
 
+from typing import Optional
+
 @app.get("/tunnels")
 def get_tunnels(
-    src_region: str = Query(..., description="The source region of the stunnel plugin"),
-    src_agent: str = Query(..., description="The source agent of the stunnel plugin"),
-    src_plugin_id: str = Query(..., description="The ID of the source stunnel plugin (e.g. system-io.cresco.stunnel...)")
+    src_region: Optional[str] = Query(None, description="The source region to filter by"),
+    src_agent: Optional[str] = Query(None, description="The source agent to filter by"),
+    src_plugin_id: Optional[str] = Query(None, description="The ID of the source stunnel plugin (e.g. system-io.cresco.stunnel...)"),
+    dst_region: Optional[str] = Query(None, description="The destination region to filter by"),
+    dst_agent: Optional[str] = Query(None, description="The destination agent to filter by"),
+    src_port: Optional[str] = Query(None, description="The source port to filter by"),
+    dst_host: Optional[str] = Query(None, description="The destination host to filter by"),
+    dst_port: Optional[str] = Query(None, description="The destination port to filter by"),
+    db: Session = Depends(get_db)
 ):
     """
-    Retrieve a list of active tunnels.
-    Requires specifying the source node and plugin ID holding the tunnels.
+    Retrieve a list of database tunnels.
+    Provide optional query parameters to filter the results.
     """
-    if not stunnel_manager:
-         raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
-         
-    tunnels = stunnel_manager.get_tunnel_list(
-        src_region=src_region,
-        src_agent=src_agent,
-        src_plugin_id=src_plugin_id
-    )
+    # Build a database query from the optional arguments
+    query = db.query(TunnelRecord)
     
-    if tunnels is None:
-        raise HTTPException(status_code=404, detail="Could not retrieve tunnels or plugin not found.")
+    if src_region:
+        query = query.filter(TunnelRecord.src_region == src_region)
+    if src_agent:
+        query = query.filter(TunnelRecord.src_agent == src_agent)
+    if dst_region:
+        query = query.filter(TunnelRecord.dst_region == dst_region)
+    if dst_agent:
+        query = query.filter(TunnelRecord.dst_agent == dst_agent)
+    if src_port:
+        query = query.filter(TunnelRecord.src_port == src_port)
+    if dst_host:
+        query = query.filter(TunnelRecord.dst_host == dst_host)
+    if dst_port:
+        query = query.filter(TunnelRecord.dst_port == dst_port)
         
-    return {"tunnels": tunnels}
+    tunnels = query.all()
+    
+    # If the user also explicitly provided the plugin ID, try to get live Cresco status for them too
+    cresco_tunnels = []
+    if stunnel_manager and src_region and src_agent and src_plugin_id:
+        try:
+            live_tunnels = stunnel_manager.get_tunnel_list(
+                src_region=src_region,
+                src_agent=src_agent,
+                src_plugin_id=src_plugin_id
+            )
+            if live_tunnels:
+                cresco_tunnels = live_tunnels
+        except Exception as e:
+            logger.error(f"Failed to fetch live tunnels: {e}")
+
+    return {
+        "database_tunnels": tunnels,
+        "live_cresco_tunnels": cresco_tunnels
+    }
 
 @app.get("/tunnels/{stunnel_id}/status")
 def get_tunnel_status(
