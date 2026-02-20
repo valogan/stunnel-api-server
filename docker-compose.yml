@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: cresco_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: cresco_user
+      POSTGRES_PASSWORD: cresco_password
+      POSTGRES_DB: cresco_tunnels
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    container_name: cresco_api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://cresco_user:cresco_password@db:5432/cresco_tunnels
+    depends_on:
+      - db
+    volumes:
+      - ./config.ini:/app/config.ini
+
+volumes:
+  postgres_data:

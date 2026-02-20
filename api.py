@@ -10,6 +10,9 @@ import uuid
 
 from pycrescolib.clientlib import clientlib
 from stunnel_direct import StunnelDirect
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from database import Base, engine, get_db, TunnelRecord
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +42,9 @@ async def lifespan(app: FastAPI):
     # 2. Connect to Cresco
     cresco_client = clientlib(host, port, service_key)
     logger.info(f"Connecting to Cresco Server at {host}:{port}...")
+    
+    # Ensure database tables exist
+    Base.metadata.create_all(bind=engine)
     
     if cresco_client.connect():
         logger.info("Successfully connected to Cresco Server.")
@@ -88,7 +94,7 @@ def read_root():
     return {"message": "Welcome to the Cresco Tunnel Manager API. Visit /docs for documentation."}
 
 @app.post("/tunnels")
-def create_tunnel(req: TunnelCreateRequest):
+def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     """
     Launch a new tunnel between a source node and a destination node.
     """
@@ -133,6 +139,22 @@ def create_tunnel(req: TunnelCreateRequest):
     
     if response is None:
         raise HTTPException(status_code=400, detail="Failed to create tunnel. Verify agents and plugins.")
+        
+    # Persist to database
+    db_tunnel = TunnelRecord(
+        stunnel_id=stunnel_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=req.src_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port,
+        buffer_size=req.buffer_size
+    )
+    db.add(db_tunnel)
+    db.commit()
+    db.refresh(db_tunnel)
         
     return {"message": f"Tunnel {stunnel_id} created successfully.", "data": response}
 
