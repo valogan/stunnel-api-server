@@ -13,7 +13,7 @@ logger = logging.getLogger()
 # Connection parameters
 host = 'localhost'
 port = 8282
-service_key = 'a6f7f889-2500-46d3-9484-5b6499186456'
+service_key = '6b40d594-2253-4b57-9939-2fbdd39f3923'
 
 # Connect to Cresco
 client = clientlib(host, port, service_key)
@@ -34,8 +34,8 @@ if client.connect():
         # Example 1: Create a tunnel using existing system plugins
 
         stunnel_id_1 = str(uuid.uuid1())
-        saved_stunnel_config = stunnel_direct_tester.create_tunnel(stunnel_id_1, 'global-region-pks2', 'global-controller-pks2', '2224',
-                                     global_region, global_agent, '127.0.0.1', '2223',
+        saved_stunnel_config = stunnel_direct_tester.create_tunnel(stunnel_id_1, 'model-tunnel-region', 'model-tunnel-global-controller', '8010',
+                                     'model-tunnel-region', 'model-tunnel-agent-1', '127.0.0.1', '8005',
                                      '8192')
 
         # we won't use the saved config, we will just reference the source region/agent and determine the system stunnel plugin
