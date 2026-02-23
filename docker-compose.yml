@@ -27,5 +27,14 @@ services:
     volumes:
       - ./config.ini:/app/config.ini
 
+  web:
+    image: nginx:alpine
+    container_name: cresco_web
+    restart: always
+    ports:
+      - "8080:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+
 volumes:
   postgres_data:
