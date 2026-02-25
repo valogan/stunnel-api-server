@@ -130,21 +130,24 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     tunnel_list = stunnel_manager.get_tunnel_list(req.src_region, req.src_agent, stunnel_plugin_id)
 
     # iterate tunnels
-    for stunnel in tunnel_list:
-        # get id from list
-        stunnel_id = stunnel['stunnel_id']
-        # get status from list
-        stunnel_status = stunnel['status']
-        logger.info(stunnel_id)
-        logger.info(stunnel_status)
+    if tunnel_list:
+        for stunnel in tunnel_list:
+            # get id from list
+            stunnel_id = stunnel['stunnel_id']
+            # get status from list
+            stunnel_status = stunnel['status']
+            logger.info(stunnel_id)
+            logger.info(stunnel_status)
 
-        # get status
-        returned_tunnel_status = stunnel_manager.get_tunnel_status(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
-        logger.info(returned_tunnel_status)
+            # get status
+            returned_tunnel_status = stunnel_manager.get_tunnel_status(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
+            logger.info(returned_tunnel_status)
 
-        #get the original config that should match saved_stunnel_config
-        returned_stunnel_config = stunnel_manager.get_tunnel_config(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
-        logger.info(returned_stunnel_config)
+            #get the original config that should match saved_stunnel_config
+            returned_stunnel_config = stunnel_manager.get_tunnel_config(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
+            logger.info(returned_stunnel_config)
+    else:
+        raise HTTPException(status_code=400, detail="Failed to create tunnel. Make sure your cresco agent is up to date.")
         
     
     if response is None:
@@ -160,7 +163,8 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
         dst_agent=req.dst_agent,
         dst_host=req.dst_host,
         dst_port=req.dst_port,
-        buffer_size=req.buffer_size
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=stunnel_plugin_id
     )
     db.add(db_tunnel)
     db.commit()

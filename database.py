@@ -35,6 +35,7 @@ class TunnelRecord(Base):
     dst_host = Column(String)
     dst_port = Column(String)
     buffer_size = Column(String)
+    stunnel_plugin_id = Column(String)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 def get_db():

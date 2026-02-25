@@ -55,6 +55,10 @@
                             <label for="buffer_size">Buffer Size</label>
                             <input type="text" id="buffer_size" value="1024" required>
                         </div>
+                        <div class="form-group">
+                            <label for="stunnel_plugin_id">Plugin ID</label>
+                            <input type="text" id="stunnel_plugin_id" placeholder="Optional/Auto-detected">
+                        </div>
                     </div>
                     <button type="submit" class="btn btn-primary" id="submitBtn">
                         <span class="btn-text">Create Tunnel</span>
@@ -74,6 +78,7 @@
                         <thead>
                             <tr>
                                 <th>ID</th>
+                                <th>Plugin ID</th> 
                                 <th>Source</th>
                                 <th>Destination</th>
                                 <th>Buffer Size</th>
@@ -82,7 +87,7 @@
                         </thead>
                         <tbody id="tunnelsBody">
                             <tr>
-                                <td colspan="5" class="text-center text-muted">Loading tunnels...</td>
+                                <td colspan="6" class="text-center text-muted">Loading tunnels...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -91,14 +96,13 @@
         </main>
     </div>
 
-    <!-- API Config Modal -->
     <div id="configModal" class="modal hidden">
         <div class="modal-content">
             <h2>API Configuration</h2>
             <p>Verify or update the API endpoint URL</p>
             <div class="form-group">
                 <label for="apiUrl">API URL</label>
-                <input type="url" id="apiUrl" value="http://localhost:8000">
+                <input type="url" id="apiUrl" value="http://localhost:8005">
             </div>
             <button id="saveConfigBtn" class="btn btn-primary">Save & Reload</button>
         </div>

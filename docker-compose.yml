@@ -19,7 +19,7 @@ services:
     container_name: cresco_api
     restart: always
     ports:
-      - "8000:8000"
+      - "8005:8000"
     environment:
       - DATABASE_URL=postgresql://cresco_user:cresco_password@db:5432/cresco_tunnels
     depends_on:
@@ -32,7 +32,7 @@ services:
     container_name: cresco_web
     restart: always
     ports:
-      - "8080:80"
+      - "8081:80"
     volumes:
       - ./web:/usr/share/nginx/html:ro
 

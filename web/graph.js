@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Determine default API URL
-    const defaultApiUrl = `http://${window.location.hostname}:8000`;
+    const defaultApiUrl = `http://${window.location.hostname}:8005`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
 
     // UI Elements

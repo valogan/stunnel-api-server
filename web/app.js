@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Determine default API URL
-    const defaultApiUrl = `http://${window.location.hostname}:8000`;
+    const defaultApiUrl = `http://${window.location.hostname}:8005`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
 
     // UI Elements
@@ -55,7 +55,8 @@ document.addEventListener('DOMContentLoaded', () => {
             dst_agent: document.getElementById('dst_agent').value,
             dst_host: document.getElementById('dst_host').value,
             dst_port: document.getElementById('dst_port').value,
-            buffer_size: document.getElementById('buffer_size').value || "1024"
+            buffer_size: document.getElementById('buffer_size').value || "1024",
+            stunnel_plugin_id: document.getElementById('stunnel_plugin_id').value
         };
 
         // Loading state
@@ -102,6 +103,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Fetch and Display Tunnels
+    // Fetch and Display Tunnels
     async function fetchTunnels() {
         const tbody = document.getElementById('tunnelsBody');
 
@@ -115,7 +117,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const tunnels = data.database_tunnels || [];
 
             if (tunnels.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">No tunnels found.</td></tr>`;
+                // Changed colspan to 6 to account for the new column
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No tunnels found.</td></tr>`;
                 return;
             }
 
@@ -123,8 +126,12 @@ document.addEventListener('DOMContentLoaded', () => {
             tunnels.forEach(t => {
                 const tr = document.createElement('tr');
 
-                // Truncate ID for display
-                const shortId = t.stunnel_id.substring(0, 8) + '...';
+                // Truncate IDs for display
+                const shortId = t.stunnel_id ? t.stunnel_id.substring(0, 8) + '...' : 'N/A';
+                
+                // Handle stunnel_plugin_id truncation
+                const rawPluginId = t.stunnel_plugin_id || 'N/A';
+                const shortPluginId = rawPluginId.length > 15 ? rawPluginId.substring(0, 15) + '...' : rawPluginId;
 
                 // Format Source and Destination
                 const source = `${t.src_agent} (${t.src_region}) :${t.src_port}`;
@@ -135,6 +142,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 tr.innerHTML = `
                     <td title="${t.stunnel_id}">${shortId}</td>
+                    <td title="${rawPluginId}">${shortPluginId}</td>
                     <td>${source}</td>
                     <td>${dest}</td>
                     <td>${t.buffer_size}</td>
@@ -145,7 +153,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } catch (error) {
             console.error('Error fetching tunnels:', error);
-            tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">Failed to load tunnels. Ensure API is reachable at ${API_URL}.</td></tr>`;
+            // Changed colspan to 6 here as well
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Failed to load tunnels. Ensure API is reachable at ${API_URL}.</td></tr>`;
         }
     }
 
