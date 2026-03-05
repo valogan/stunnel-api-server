@@ -1,6 +1,5 @@
-fastapi
-uvicorn
-pydantic
+flask
+flask-cors
 pycrescolib
 sqlalchemy
 psycopg2-binary
