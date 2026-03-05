@@ -1,33 +1,28 @@
 import logging
 import configparser
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
-from fastapi import Request
-import time
 import uuid
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 from pycrescolib.clientlib import clientlib
 from stunnel_direct import StunnelDirect
-from fastapi import Depends
-from sqlalchemy.orm import Session
-from database import Base, engine, get_db, TunnelRecord
+from database import Base, engine, SessionLocal, TunnelRecord
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api_server")
 
+# Initialize Flask App
+app = Flask(__name__)
+CORS(app)
+
 # Global instances
 cresco_client = None
 stunnel_manager = None
 
-# --- Lifespan & Initialization ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def init_app():
     global cresco_client, stunnel_manager
     
-    # 1. Read config
     config = configparser.ConfigParser()
     config.read('config.ini')
     
@@ -39,7 +34,6 @@ async def lifespan(app: FastAPI):
         logger.error("config.ini missing 'general' section or required keys. Ensure config.ini is present.")
         raise
     
-    # 2. Connect to Cresco
     cresco_client = clientlib(host, port, service_key)
     logger.info(f"Connecting to Cresco Server at {host}:{port}...")
     
@@ -48,170 +42,149 @@ async def lifespan(app: FastAPI):
     
     if cresco_client.connect():
         logger.info("Successfully connected to Cresco Server.")
-        # 3. Initialize StunnelManager
         stunnel_manager = StunnelDirect(cresco_client, logger=logger)
     else:
         logger.error("Failed to connect to Cresco server!")
-        # We don't strictly crash the app so you can see errors, but you could raise an exception here.
-    # --- ADD THIS DEBUG BLOCK ---
-    logger.info("=== REGISTERED FASTAPI ROUTES ===")
-    for route in app.routes:
-        methods = getattr(route, "methods", set())
-        path = getattr(route, "path", route.name)
-        logger.info(f"{methods} {path}")
-    logger.info("=================================")
 
-    yield # The app runs while yielded
-    
-    # 4. Cleanup on shutdown
-    logger.info("Shutting down API server, closing Cresco connection...")
-    if cresco_client:
-        cresco_client.close()
+# Initialize on startup
+try:
+    init_app()
+except Exception as e:
+    logger.error(f"Initialization failed: {e}")
 
-# Initialize FastAPI App
-app = FastAPI(
-    title="Cresco Tunnel Manager API",
-    description="An API to launch and manage Cresco stunnel pipelines.",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # Allows all origins
-    allow_credentials=True,
-    allow_methods=["*"], # Allows all methods
-    allow_headers=["*"], # Allows all headers
-)
-
-# --- Define Pydantic Models for Input ---
-class TunnelCreateRequest(BaseModel):
-    src_region: str
-    src_agent: str
-    src_port: str
-    dst_region: str
-    dst_agent: str
-    dst_host: str
-    dst_port: str
-    buffer_size: str = "1024"
-
-# --- Endpoints ---
-
-@app.get("/")
+@app.route("/", methods=["GET"])
 def read_root():
-    return {"message": "Welcome to the Cresco Tunnel Manager API. Visit /docs for documentation."}
+    return jsonify({"message": "Welcome to the Cresco Tunnel Manager API (Flask Version)."})
 
-@app.post("/tunnels")
-def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
+@app.route("/tunnels", methods=["POST"])
+def create_tunnel():
     """
     Launch a new tunnel between a source node and a destination node.
     """
     if not stunnel_manager:
-         raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
+        return jsonify({"detail": "Stunnel manager not initialized (Check Cresco connection)."}), 500
          
+    req = request.json
+    if not req:
+        return jsonify({"detail": "Invalid JSON body"}), 400
+
+    required_fields = ["src_region", "src_agent", "src_port", "dst_region", "dst_agent", "dst_host", "dst_port"]
+    for field in required_fields:
+        if field not in req:
+            return jsonify({"detail": f"Missing required field: {field}"}), 400
+
+    buffer_size = req.get("buffer_size", "1024")
     stunnel_id = str(uuid.uuid1())
+    
     response = stunnel_manager.create_tunnel(
         stunnel_id=stunnel_id,
-        src_region=req.src_region,
-        src_agent=req.src_agent,
-        src_port=req.src_port,
-        dst_region=req.dst_region,
-        dst_agent=req.dst_agent,
-        dst_host=req.dst_host,
-        dst_port=req.dst_port,
-        buffer_size=req.buffer_size
+        src_region=req["src_region"],
+        src_agent=req["src_agent"],
+        src_port=req["src_port"],
+        dst_region=req["dst_region"],
+        dst_agent=req["dst_agent"],
+        dst_host=req["dst_host"],
+        dst_port=req["dst_port"],
+        buffer_size=buffer_size
     )
 
-    stunnel_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
-    
-    # get list of tunnels
-    tunnel_list = stunnel_manager.get_tunnel_list(req.src_region, req.src_agent, stunnel_plugin_id)
+    stunnel_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req["src_region"], req["src_agent"])
+    tunnel_list = stunnel_manager.get_tunnel_list(req["src_region"], req["src_agent"], stunnel_plugin_id)
 
-    # iterate tunnels
     if tunnel_list:
         for stunnel in tunnel_list:
-            # get id from list
-            stunnel_id = stunnel['stunnel_id']
-            # get status from list
-            stunnel_status = stunnel['status']
-            logger.info(stunnel_id)
-            logger.info(stunnel_status)
+            s_id = stunnel['stunnel_id']
+            s_status = stunnel['status']
+            logger.info(f"{s_id}: {s_status}")
 
-            # get status
-            returned_tunnel_status = stunnel_manager.get_tunnel_status(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
+            returned_tunnel_status = stunnel_manager.get_tunnel_status(req["src_region"], req["src_agent"], stunnel_plugin_id, s_id)
             logger.info(returned_tunnel_status)
 
-            #get the original config that should match saved_stunnel_config
-            returned_stunnel_config = stunnel_manager.get_tunnel_config(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
+            returned_stunnel_config = stunnel_manager.get_tunnel_config(req["src_region"], req["src_agent"], stunnel_plugin_id, s_id)
             logger.info(returned_stunnel_config)
     else:
-        raise HTTPException(status_code=400, detail="Failed to create tunnel. Make sure your cresco agent is up to date.")
+        return jsonify({"detail": "Failed to create tunnel. Make sure your cresco agent is up to date."}), 400
         
-    
     if response is None:
-        raise HTTPException(status_code=400, detail="Failed to create tunnel. Verify agents and plugins.")
+        return jsonify({"detail": "Failed to create tunnel. Verify agents and plugins."}), 400
         
     # Persist to database
-    db_tunnel = TunnelRecord(
-        stunnel_id=stunnel_id,
-        src_region=req.src_region,
-        src_agent=req.src_agent,
-        src_port=req.src_port,
-        dst_region=req.dst_region,
-        dst_agent=req.dst_agent,
-        dst_host=req.dst_host,
-        dst_port=req.dst_port,
-        buffer_size=req.buffer_size,
-        stunnel_plugin_id=stunnel_plugin_id
-    )
-    db.add(db_tunnel)
-    db.commit()
-    db.refresh(db_tunnel)
+    db = SessionLocal()
+    try:
+        db_tunnel = TunnelRecord(
+            stunnel_id=stunnel_id,
+            src_region=req["src_region"],
+            src_agent=req["src_agent"],
+            src_port=req["src_port"],
+            dst_region=req["dst_region"],
+            dst_agent=req["dst_agent"],
+            dst_host=req["dst_host"],
+            dst_port=req["dst_port"],
+            buffer_size=buffer_size,
+            stunnel_plugin_id=stunnel_plugin_id
+        )
+        db.add(db_tunnel)
+        db.commit()
+    finally:
+        db.close()
         
-    return {"message": f"Tunnel {stunnel_id} created successfully.", "data": response}
+    return jsonify({"message": f"Tunnel {stunnel_id} created successfully.", "data": response})
 
-
-from typing import Optional
-
-@app.get("/tunnels")
-def get_tunnels(
-    src_region: Optional[str] = Query(None, description="The source region to filter by"),
-    src_agent: Optional[str] = Query(None, description="The source agent to filter by"),
-    src_plugin_id: Optional[str] = Query(None, description="The ID of the source stunnel plugin (e.g. system-io.cresco.stunnel...)"),
-    dst_region: Optional[str] = Query(None, description="The destination region to filter by"),
-    dst_agent: Optional[str] = Query(None, description="The destination agent to filter by"),
-    src_port: Optional[str] = Query(None, description="The source port to filter by"),
-    dst_host: Optional[str] = Query(None, description="The destination host to filter by"),
-    dst_port: Optional[str] = Query(None, description="The destination port to filter by"),
-    db: Session = Depends(get_db)
-):
+@app.route("/tunnels", methods=["GET"])
+def get_tunnels():
     """
     Retrieve a list of database tunnels.
     Provide optional query parameters to filter the results.
     """
-    # Build a database query from the optional arguments
-    query = db.query(TunnelRecord)
-    
-    if src_region:
-        query = query.filter(TunnelRecord.src_region == src_region)
-    if src_agent:
-        query = query.filter(TunnelRecord.src_agent == src_agent)
-    if dst_region:
-        query = query.filter(TunnelRecord.dst_region == dst_region)
-    if dst_agent:
-        query = query.filter(TunnelRecord.dst_agent == dst_agent)
-    if src_port:
-        query = query.filter(TunnelRecord.src_port == src_port)
-    if dst_host:
-        query = query.filter(TunnelRecord.dst_host == dst_host)
-    if dst_port:
-        query = query.filter(TunnelRecord.dst_port == dst_port)
+    src_region = request.args.get("src_region")
+    src_agent = request.args.get("src_agent")
+    src_plugin_id = request.args.get("src_plugin_id")
+    dst_region = request.args.get("dst_region")
+    dst_agent = request.args.get("dst_agent")
+    src_port = request.args.get("src_port")
+    dst_host = request.args.get("dst_host")
+    dst_port = request.args.get("dst_port")
+
+    db = SessionLocal()
+    try:
+        query = db.query(TunnelRecord)
         
-    tunnels = query.all()
+        if src_region:
+            query = query.filter(TunnelRecord.src_region == src_region)
+        if src_agent:
+            query = query.filter(TunnelRecord.src_agent == src_agent)
+        if dst_region:
+            query = query.filter(TunnelRecord.dst_region == dst_region)
+        if dst_agent:
+            query = query.filter(TunnelRecord.dst_agent == dst_agent)
+        if src_port:
+            query = query.filter(TunnelRecord.src_port == src_port)
+        if dst_host:
+            query = query.filter(TunnelRecord.dst_host == dst_host)
+        if dst_port:
+            query = query.filter(TunnelRecord.dst_port == dst_port)
+            
+        tunnels = query.all()
+        # Convert objects to dicts
+        tunnels_data = []
+        for t in tunnels:
+            tunnels_data.append({
+                "id": t.id,
+                "stunnel_id": t.stunnel_id,
+                "src_region": t.src_region,
+                "src_agent": t.src_agent,
+                "src_port": t.src_port,
+                "dst_region": t.dst_region,
+                "dst_agent": t.dst_agent,
+                "dst_host": t.dst_host,
+                "dst_port": t.dst_port,
+                "buffer_size": t.buffer_size,
+                "stunnel_plugin_id": t.stunnel_plugin_id,
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            })
+    finally:
+        db.close()
     
-    # If the user also explicitly provided the plugin ID, try to get live Cresco status for them too
     cresco_tunnels = []
     if stunnel_manager and src_region and src_agent and src_plugin_id:
         try:
@@ -225,24 +198,26 @@ def get_tunnels(
         except Exception as e:
             logger.error(f"Failed to fetch live tunnels: {e}")
 
-    return {
-        "database_tunnels": tunnels,
+    return jsonify({
+        "database_tunnels": tunnels_data,
         "live_cresco_tunnels": cresco_tunnels
-    }
+    })
 
-@app.get("/tunnels/{stunnel_id}/status")
-def get_tunnel_status(
-    stunnel_id: str,
-    src_region: str = Query(..., description="The source region of the stunnel plugin"),
-    src_agent: str = Query(..., description="The source agent of the stunnel plugin"),
-    src_plugin_id: str = Query(..., description="The ID of the source stunnel plugin (e.g. system-io.cresco.stunnel...)")
-):
+@app.route("/tunnels/<stunnel_id>/status", methods=["GET"])
+def get_tunnel_status(stunnel_id):
     """
     Retrieve the status of a specific tunnel by its ID.
     Requires specifying the overarching source node and plugin ID.
     """
+    src_region = request.args.get("src_region")
+    src_agent = request.args.get("src_agent")
+    src_plugin_id = request.args.get("src_plugin_id")
+
+    if not all([src_region, src_agent, src_plugin_id]):
+        return jsonify({"detail": "Missing query parameters: src_region, src_agent, src_plugin_id"}), 400
+
     if not stunnel_manager:
-         raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
+        return jsonify({"detail": "Stunnel manager not initialized."}), 500
          
     status = stunnel_manager.get_tunnel_status(
         src_region=src_region,
@@ -252,12 +227,9 @@ def get_tunnel_status(
     )
     
     if status is None:
-        raise HTTPException(status_code=404, detail=f"No status found for tunnel {stunnel_id}.")
+        return jsonify({"detail": f"No status found for tunnel {stunnel_id}."}), 404
         
-    return {"stunnel_id": stunnel_id, "status": status}
+    return jsonify({"stunnel_id": stunnel_id, "status": status})
 
 if __name__ == "__main__":
-    import uvicorn
-    # Running programmatically if file is executed directly
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
-
+    app.run(host="0.0.0.0", port=8000, debug=True)
