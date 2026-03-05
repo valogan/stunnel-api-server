@@ -82,12 +82,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # Using an explicit list avoids potential issues with credentials and '*'.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://128.163.202.61:8081",
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
