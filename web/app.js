@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Determine default API URL
-    const defaultApiUrl = `http://${window.location.hostname}:8005`;
+    const defaultApiUrl = `/api`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
 
     // UI Elements
@@ -128,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Truncate IDs for display
                 const shortId = t.stunnel_id ? t.stunnel_id.substring(0, 8) + '...' : 'N/A';
-                
+
                 // Handle stunnel_plugin_id truncation
                 const rawPluginId = t.stunnel_plugin_id || 'N/A';
                 const shortPluginId = rawPluginId.length > 15 ? rawPluginId.substring(0, 15) + '...' : rawPluginId;
