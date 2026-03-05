@@ -44,8 +44,20 @@ async def lifespan(app: FastAPI):
     cresco_client = clientlib(host, port, service_key)
     logger.info(f"Connecting to Cresco Server at {host}:{port}...")
     
-    # Ensure database tables exist
-    Base.metadata.create_all(bind=engine)
+    # Ensure database tables exist. Retry because postgres might take a moment to be available via DNS.
+    import asyncio
+    for attempt in range(5):
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("Database tables verified/created successfully.")
+            break
+        except Exception as e:
+            if attempt < 4:
+                logger.warning(f"Database not ready. Retrying in 5 seconds... ({e})")
+                await asyncio.sleep(5)
+            else:
+                logger.error("Failed to connect to the database after 5 attempts.")
+                raise
     
     if cresco_client.connect():
         logger.info("Successfully connected to Cresco Server.")
