@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from fastapi import Request
+from fastapi.responses import Response
 import time
 import uuid
 
@@ -173,6 +174,23 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     db.refresh(db_tunnel)
         
     return {"message": f"Tunnel {stunnel_id} created successfully.", "data": response}
+
+
+@app.options("/tunnels")
+async def tunnels_preflight(request: Request):
+    """Handle CORS preflight requests for /tunnels explicitly.
+    This ensures OPTIONS requests receive the appropriate CORS headers
+    even if middleware isn't intercepting for some deployment setups.
+    """
+    origin = request.headers.get("origin") or "*"
+    request_headers = request.headers.get("access-control-request-headers", "*")
+    headers = {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+        "Access-Control-Allow-Headers": request_headers,
+        "Access-Control-Allow-Credentials": "true",
+    }
+    return Response(status_code=204, headers=headers)
 
 
 from typing import Optional
