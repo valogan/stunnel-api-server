@@ -2,3 +2,8 @@
 host=
 port=
 service_key=
+
+[proxy]
+region=
+agent=
+host=localhost

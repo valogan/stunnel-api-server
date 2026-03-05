@@ -22,6 +22,9 @@ logger = logging.getLogger("api_server")
 # Global instances
 cresco_client = None
 stunnel_manager = None
+proxy_region = None
+proxy_agent = None
+proxy_host = None
 
 # --- Lifespan & Initialization ---
 @asynccontextmanager
@@ -39,6 +42,17 @@ async def lifespan(app: FastAPI):
     except configparser.NoSectionError as e:
         logger.error("config.ini missing 'general' section or required keys. Ensure config.ini is present.")
         raise
+        
+    global proxy_region, proxy_agent, proxy_host
+    try:
+        proxy_region = config.get('proxy', 'region')
+        proxy_agent = config.get('proxy', 'agent')
+        proxy_host = config.get('proxy', 'host', fallback='localhost')
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        logger.error("config.ini missing 'proxy' section or required keys. Using defaults.")
+        proxy_region = ""
+        proxy_agent = ""
+        proxy_host = "localhost"
     
     # 2. Connect to Cresco
     cresco_client = clientlib(host, port, service_key)
@@ -126,12 +140,34 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
          
-    stunnel_id = str(uuid.uuid1())
-    response = stunnel_manager.create_tunnel(
-        stunnel_id=stunnel_id,
+    if not proxy_region or not proxy_agent:
+        raise HTTPException(status_code=500, detail="Proxy node is not configured in config.ini")
+
+    import random
+    proxy_port = str(random.randint(10000, 60000))
+         
+    hop1_id = str(uuid.uuid1())
+    hop2_id = str(uuid.uuid1())
+    
+    # Hop 1: Source to Proxy
+    response_hop1 = stunnel_manager.create_tunnel(
+        stunnel_id=hop1_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
         src_port=req.src_port,
+        dst_region=proxy_region,
+        dst_agent=proxy_agent,
+        dst_host=proxy_host,
+        dst_port=proxy_port,
+        buffer_size=req.buffer_size
+    )
+
+    # Hop 2: Proxy to Destination
+    response_hop2 = stunnel_manager.create_tunnel(
+        stunnel_id=hop2_id,
+        src_region=proxy_region,
+        src_agent=proxy_agent,
+        src_port=proxy_port,
         dst_region=req.dst_region,
         dst_agent=req.dst_agent,
         dst_host=req.dst_host,
@@ -139,53 +175,53 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
         buffer_size=req.buffer_size
     )
 
-    stunnel_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
-    
-    # get list of tunnels
-    tunnel_list = stunnel_manager.get_tunnel_list(req.src_region, req.src_agent, stunnel_plugin_id)
+    if response_hop1 is None or response_hop2 is None:
+        raise HTTPException(status_code=400, detail="Failed to create proxy tunnel hops. Verify agents and plugins.")
 
-    # iterate tunnels
-    if tunnel_list:
-        for stunnel in tunnel_list:
-            # get id from list
-            stunnel_id = stunnel['stunnel_id']
-            # get status from list
-            stunnel_status = stunnel['status']
-            logger.info(stunnel_id)
-            logger.info(stunnel_status)
+    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    proxy_plugin_id = stunnel_manager.find_existing_stunnel_plugin(proxy_region, proxy_agent)
 
-            # get status
-            returned_tunnel_status = stunnel_manager.get_tunnel_status(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
-            logger.info(returned_tunnel_status)
-
-            #get the original config that should match saved_stunnel_config
-            returned_stunnel_config = stunnel_manager.get_tunnel_config(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
-            logger.info(returned_stunnel_config)
-    else:
-        raise HTTPException(status_code=400, detail="Failed to create tunnel. Make sure your cresco agent is up to date.")
-        
-    
-    if response is None:
-        raise HTTPException(status_code=400, detail="Failed to create tunnel. Verify agents and plugins.")
-        
-    # Persist to database
-    db_tunnel = TunnelRecord(
-        stunnel_id=stunnel_id,
+    # Persist Hop 1 to DB
+    db_tunnel_hop1 = TunnelRecord(
+        stunnel_id=hop1_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
         src_port=req.src_port,
+        dst_region=proxy_region,
+        dst_agent=proxy_agent,
+        dst_host=proxy_host,
+        dst_port=proxy_port,
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=src_plugin_id
+    )
+    db.add(db_tunnel_hop1)
+
+    # Persist Hop 2 to DB
+    db_tunnel_hop2 = TunnelRecord(
+        stunnel_id=hop2_id,
+        src_region=proxy_region,
+        src_agent=proxy_agent,
+        src_port=proxy_port,
         dst_region=req.dst_region,
         dst_agent=req.dst_agent,
         dst_host=req.dst_host,
         dst_port=req.dst_port,
         buffer_size=req.buffer_size,
-        stunnel_plugin_id=stunnel_plugin_id
+        stunnel_plugin_id=proxy_plugin_id
     )
-    db.add(db_tunnel)
+    db.add(db_tunnel_hop2)
+    
     db.commit()
-    db.refresh(db_tunnel)
+    db.refresh(db_tunnel_hop1)
+    db.refresh(db_tunnel_hop2)
         
-    return {"message": f"Tunnel {stunnel_id} created successfully.", "data": response}
+    return {
+        "message": f"Proxy Tunnels {hop1_id} and {hop2_id} created successfully.", 
+        "data": {
+            "hop1": response_hop1,
+            "hop2": response_hop2
+        }
+    }
 
 
 @app.options("/tunnels")
