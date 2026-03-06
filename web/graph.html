@@ -55,6 +55,36 @@
     </div>
     <div id="configToggle" class="config-toggle" title="Settings">⚙️</div>
 
+    <!-- Edge Creation Modal -->
+    <div id="edgeModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Create Tunnel</h2>
+            <p id="edgeModalDesc">Configure ports for the new tunnel.</p>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="edgeSrcPort">Source Port</label>
+                    <input type="number" id="edgeSrcPort" required placeholder="e.g., 8080">
+                </div>
+                <div class="form-group">
+                    <label for="edgeDstPort">Destination Port</label>
+                    <input type="number" id="edgeDstPort" required placeholder="e.g., 80">
+                </div>
+                <div class="form-group">
+                    <label for="edgeDstHost">Destination Host</label>
+                    <input type="text" id="edgeDstHost" value="127.0.0.1" required>
+                </div>
+                <div class="form-group">
+                    <label for="edgeBufferSize">Buffer Size</label>
+                    <input type="number" id="edgeBufferSize" value="1024" required>
+                </div>
+            </div>
+            <div style="margin-top: 15px; display: flex; gap: 10px;">
+                <button id="saveEdgeBtn" class="btn btn-primary">Create Tunnel</button>
+                <button id="cancelEdgeBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <script src="graph.js"></script>
 </body>
 

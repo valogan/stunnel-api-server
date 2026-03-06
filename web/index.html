@@ -13,86 +13,119 @@
             <h1>Cresco Tunnel Manager</h1>
             <p>Manage and monitor your stunnel pipelines</p>
             <nav class="header-nav">
-                <a href="index.html" class="nav-link active">Home</a>
+                <a href="#" id="nav-home" class="nav-link active">Home</a>
+                <a href="#" id="nav-agents" class="nav-link">Agents</a>
                 <a href="graph.html" class="nav-link">Graph View</a>
             </nav>
         </header>
 
         <main>
-            <section class="card create-tunnel">
-                <h2>Create New Tunnel</h2>
-                <form id="createTunnelForm">
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="src_region">Source Region</label>
-                            <input type="text" id="src_region" required placeholder="e.g., model-tunnel-region">
+            <!-- TUNNELS VIEW (Default) -->
+            <div id="view-tunnels">
+                <section class="card create-tunnel">
+                    <h2>Create New Tunnel</h2>
+                    <form id="createTunnelForm">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label for="src_region">Source Region</label>
+                                <input type="text" id="src_region" required placeholder="e.g., model-tunnel-region">
+                            </div>
+                            <div class="form-group">
+                                <label for="src_agent">Source Agent</label>
+                                <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-agent-1">
+                            </div>
+                            <div class="form-group">
+                                <label for="src_port">Source Port</label>
+                                <input type="text" id="src_port" required placeholder="e.g., 8080">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_region">Destination Region</label>
+                                <input type="text" id="dst_region" required placeholder="e.g., model-tunnel-region">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_agent">Destination Agent</label>
+                                <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent2">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_host">Destination Host</label>
+                                <input type="text" id="dst_host" required placeholder="e.g., 127.0.0.1">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_port">Destination Port</label>
+                                <input type="text" id="dst_port" required placeholder="e.g., 80">
+                            </div>
+                            <div class="form-group">
+                                <label for="buffer_size">Buffer Size</label>
+                                <input type="text" id="buffer_size" value="1024" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="stunnel_plugin_id">Plugin ID</label>
+                                <input type="text" id="stunnel_plugin_id" placeholder="Optional/Auto-detected">
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label for="src_agent">Source Agent</label>
-                            <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-agent-1">
-                        </div>
-                        <div class="form-group">
-                            <label for="src_port">Source Port</label>
-                            <input type="text" id="src_port" required placeholder="e.g., 8080">
-                        </div>
-                        <div class="form-group">
-                            <label for="dst_region">Destination Region</label>
-                            <input type="text" id="dst_region" required placeholder="e.g., model-tunnel-region">
-                        </div>
-                        <div class="form-group">
-                            <label for="dst_agent">Destination Agent</label>
-                            <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent2">
-                        </div>
-                        <div class="form-group">
-                            <label for="dst_host">Destination Host</label>
-                            <input type="text" id="dst_host" required placeholder="e.g., 127.0.0.1">
-                        </div>
-                        <div class="form-group">
-                            <label for="dst_port">Destination Port</label>
-                            <input type="text" id="dst_port" required placeholder="e.g., 80">
-                        </div>
-                        <div class="form-group">
-                            <label for="buffer_size">Buffer Size</label>
-                            <input type="text" id="buffer_size" value="1024" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="stunnel_plugin_id">Plugin ID</label>
-                            <input type="text" id="stunnel_plugin_id" placeholder="Optional/Auto-detected">
-                        </div>
-                    </div>
-                    <button type="submit" class="btn btn-primary" id="submitBtn">
-                        <span class="btn-text">Create Tunnel</span>
-                        <div class="loader hidden"></div>
-                    </button>
-                    <div id="formMessage" class="message hidden"></div>
-                </form>
-            </section>
+                        <button type="submit" class="btn btn-primary" id="submitBtn">
+                            <span class="btn-text">Create Tunnel</span>
+                            <div class="loader hidden"></div>
+                        </button>
+                        <div id="formMessage" class="message hidden"></div>
+                    </form>
+                </section>
 
-            <section class="card tunnel-list">
-                <div class="section-header">
-                    <h2>Active Tunnels</h2>
-                    <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
-                </div>
-                <div class="table-container">
-                    <table id="tunnelsTable">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Plugin ID</th> 
-                                <th>Source</th>
-                                <th>Destination</th>
-                                <th>Buffer Size</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tunnelsBody">
-                            <tr>
-                                <td colspan="6" class="text-center text-muted">Loading tunnels...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
+                <section class="card tunnel-list">
+                    <div class="section-header">
+                        <h2>Active Tunnels</h2>
+                        <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+                    </div>
+                    <div class="table-container">
+                        <table id="tunnelsTable">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Plugin ID</th> 
+                                    <th>Source</th>
+                                    <th>Destination</th>
+                                    <th>Buffer Size</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tunnelsBody">
+                                <tr>
+                                    <td colspan="7" class="text-center text-muted">Loading tunnels...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- AGENTS VIEW -->
+            <div id="view-agents" class="hidden">
+                <section class="card agent-list">
+                    <div class="section-header">
+                        <h2>Connected Agents</h2>
+                        <button id="refreshAgentsBtn" class="btn btn-secondary">Refresh Agents</button>
+                    </div>
+                    <div class="table-container">
+                        <table id="agentsTable">
+                            <thead>
+                                <tr>
+                                    <th>Region ID</th>
+                                    <th>Agent ID</th>
+                                    <th>Status</th>
+                                    <th>Environment</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="agentsBody">
+                                <tr>
+                                    <td colspan="5" class="text-center text-muted">Loading agents...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
         </main>
     </div>
 
@@ -108,6 +141,16 @@
         </div>
     </div>
     <div id="configToggle" class="config-toggle" title="Settings">⚙️</div>
+
+    <div id="infoModal" class="modal hidden">
+        <div class="modal-content info-modal-content">
+            <h2 id="infoModalTitle">Info</h2>
+            <div class="form-group">
+                <pre id="infoModalBody" style="background:#1e1e2d; padding:15px; border-radius:8px; overflow-x:auto; color:#a5b4fc; font-size:14px; max-height:400px; overflow-y:auto;"></pre>
+            </div>
+            <button id="closeInfoModalBtn" class="btn btn-secondary" style="margin-top:10px;">Close</button>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

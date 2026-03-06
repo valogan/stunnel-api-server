@@ -34,38 +34,57 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    refreshBtn.addEventListener('click', () => {
-        fetchTunnels();
-    });
-
     // Vis.js Network instance
     let network = null;
+    let edgeCreationCallback = null;
+    const edgeModal = document.getElementById('edgeModal');
+    const saveEdgeBtn = document.getElementById('saveEdgeBtn');
+    const cancelEdgeBtn = document.getElementById('cancelEdgeBtn');
 
-    // Fetch and Display Tunnels in Graph
-    async function fetchTunnels() {
+    let currentNodesMap = new Map(); // Store full agent data
+
+    // Fetch Agents and Tunnels
+    async function fetchDataAndDraw() {
         try {
-            const response = await fetch(`${API_URL}/tunnels`);
-            if (!response.ok) {
-                throw new Error('Failed to fetch tunnels');
-            }
+            // Fetch Agents
+            const agentsRes = await fetch(`${API_URL}/agents`);
+            if (!agentsRes.ok) throw new Error('Failed to fetch agents');
+            const agentsData = await agentsRes.json();
+            const agents = agentsData.agents || [];
 
-            const data = await response.json();
-            const tunnels = data.database_tunnels || [];
+            // Fetch Tunnels
+            const tunnelsRes = await fetch(`${API_URL}/tunnels`);
+            if (!tunnelsRes.ok) throw new Error('Failed to fetch tunnels');
+            const tunnelsData = await tunnelsRes.json();
+            const tunnels = tunnelsData.database_tunnels || [];
 
-            drawGraph(tunnels);
+            drawGraph(agents, tunnels);
 
         } catch (error) {
-            console.error('Error fetching tunnels:', error);
+            console.error('Error fetching data for graph:', error);
         }
     }
 
-    function drawGraph(tunnels) {
+    function drawGraph(agents, tunnels) {
         const nodesData = new Map();
         const edgesData = [];
+        currentNodesMap.clear();
 
+        // 1. Add all Agents as nodes
+        agents.forEach(a => {
+            currentNodesMap.set(a.agent_id, { region: a.region_id, agent: a.agent_id });
+            nodesData.set(a.agent_id, {
+                id: a.agent_id,
+                label: a.agent_id,
+                group: a.region_id
+            });
+        });
+
+        // 2. Add Tunnels as edges (and missing nodes just in case)
         tunnels.forEach(t => {
-            // Source Node
+            // Source Node (if not already fetched by agents list)
             if (!nodesData.has(t.src_agent)) {
+                currentNodesMap.set(t.src_agent, { region: t.src_region, agent: t.src_agent });
                 nodesData.set(t.src_agent, {
                     id: t.src_agent,
                     label: t.src_agent,
@@ -75,19 +94,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Destination Node
             if (!nodesData.has(t.dst_agent)) {
+                let dRegion = t.dst_region || t.src_region;
+                currentNodesMap.set(t.dst_agent, { region: dRegion, agent: t.dst_agent });
                 nodesData.set(t.dst_agent, {
                     id: t.dst_agent,
                     label: t.dst_agent,
-                    group: t.dst_region || t.src_region
+                    group: dRegion
                 });
             }
 
             // Edge
             edgesData.push({
+                id: t.stunnel_id, // Store ID directly as the edge string ID
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
                 title: `Tunnel ID: ${t.stunnel_id}\nBuffer: ${t.buffer_size}`,
+                stunnel_id: t.stunnel_id, // Store as property
                 arrows: 'to',
                 color: { color: '#3b82f6', highlight: '#60a5fa' },
                 font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' }
@@ -113,9 +136,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const container = document.getElementById('mynetwork');
 
+        const edgesDataset = new vis.DataSet(edgesData);
         const data = {
             nodes: new vis.DataSet(nodes),
-            edges: new vis.DataSet(edgesData)
+            edges: edgesDataset
         };
 
         const options = {
@@ -134,6 +158,26 @@ document.addEventListener('DOMContentLoaded', () => {
             interaction: {
                 hover: true,
                 tooltipDelay: 200
+            },
+            manipulation: {
+                enabled: false,
+                addEdge: function (edgeData, callback) {
+                    if (edgeData.from === edgeData.to) {
+                        alert("Cannot connect an agent to itself.");
+                        callback(null);
+                        return;
+                    }
+                    
+                    // Show Modal
+                    document.getElementById('edgeSrcPort').value = '';
+                    document.getElementById('edgeDstPort').value = '';
+                    
+                    edgeModal.classList.remove('hidden');
+                    edgeCreationCallback = {
+                        edgeData: edgeData,
+                        callback: callback
+                    };
+                }
             }
         };
 
@@ -143,8 +187,132 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         network = new vis.Network(container, data, options);
+
+        // Auto-enter Add Edge mode when clicking a node
+        network.on("selectNode", function(params) {
+            network.addEdgeMode();
+        });
+        
+        network.on("deselectNode", function(params) {
+            network.disableEditMode();
+        });
+
+        // Handle edge clicks for deletion
+        network.on("selectEdge", async function(params) {
+            // Only trigger if an edge is clicked without a node being selected
+            if (params.nodes.length === 0 && params.edges.length === 1) {
+                const edgeId = params.edges[0];
+                const edge = edgesDataset.get(edgeId);
+                
+                if (edge && edge.stunnel_id) {
+                    if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
+                        await deleteTunnelFromGraph(edge.stunnel_id);
+                    }
+                }
+            }
+        });
     }
 
+    async function deleteTunnelFromGraph(tunnelId) {
+        try {
+            const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
+                method: 'DELETE',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to delete tunnel');
+            }
+            
+            // Refresh graph entirely
+            await fetchDataAndDraw();
+        } catch (error) {
+            console.error('Error deleting tunnel:', error);
+            alert(`Error deleting tunnel: ${error.message}`);
+        }
+    }
+
+    // Modal Button Handlers
+    cancelEdgeBtn.addEventListener('click', () => {
+        edgeModal.classList.add('hidden');
+        if (edgeCreationCallback) {
+            edgeCreationCallback.callback(null);
+            edgeCreationCallback = null;
+        }
+    });
+
+    saveEdgeBtn.addEventListener('click', async () => {
+        if (!edgeCreationCallback) return;
+
+        const srcPort = document.getElementById('edgeSrcPort').value;
+        const dstPort = document.getElementById('edgeDstPort').value;
+        const dstHost = document.getElementById('edgeDstHost').value || "127.0.0.1";
+        const bufferSize = document.getElementById('edgeBufferSize').value || "1024";
+
+        if (!srcPort || !dstPort || !dstHost) {
+            alert("Please fill in all required fields.");
+            return;
+        }
+
+        const edgeData = edgeCreationCallback.edgeData;
+        
+        const srcNode = currentNodesMap.get(edgeData.from);
+        const dstNode = currentNodesMap.get(edgeData.to);
+
+        const payload = {
+            src_region: srcNode.region,
+            src_agent: srcNode.agent,
+            src_port: srcPort,
+            dst_region: dstNode.region,
+            dst_agent: dstNode.agent,
+            dst_host: dstHost,
+            dst_port: dstPort,
+            buffer_size: bufferSize,
+            stunnel_plugin_id: ""
+        };
+
+        saveEdgeBtn.disabled = true;
+        saveEdgeBtn.textContent = "Creating...";
+
+        try {
+            const response = await fetch(`${API_URL}/tunnels`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || 'Failed to create tunnel');
+            }
+
+            edgeModal.classList.add('hidden');
+            
+            // Refresh graph entirely
+            await fetchDataAndDraw();
+
+            // Clear visual add edge state
+            edgeCreationCallback.callback(null);
+            edgeCreationCallback = null;
+
+        } catch (error) {
+            console.error('Error creating tunnel:', error);
+            alert(`Error creating tunnel: ${error.message}`);
+        } finally {
+            saveEdgeBtn.disabled = false;
+            saveEdgeBtn.textContent = "Create Tunnel";
+        }
+    });
+
+    // Replace original refresh button action
+    refreshBtn.addEventListener('click', () => {
+        fetchDataAndDraw();
+    });
+
     // Initial fetch
-    fetchTunnels();
+    fetchDataAndDraw();
 });

@@ -34,11 +34,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Tab Switching Logic
+    const navHome = document.getElementById('nav-home');
+    const navAgents = document.getElementById('nav-agents');
+    const viewTunnels = document.getElementById('view-tunnels');
+    const viewAgents = document.getElementById('view-agents');
+
+    navHome.addEventListener('click', (e) => {
+        e.preventDefault();
+        navHome.classList.add('active');
+        navAgents.classList.remove('active');
+        viewTunnels.classList.remove('hidden');
+        viewAgents.classList.add('hidden');
+        fetchTunnels();
+    });
+
+    navAgents.addEventListener('click', (e) => {
+        e.preventDefault();
+        navAgents.classList.add('active');
+        navHome.classList.remove('active');
+        viewAgents.classList.remove('hidden');
+        viewTunnels.classList.add('hidden');
+        fetchAgents();
+    });
+
     // Handle Form Submission
     const createTunnelForm = document.getElementById('createTunnelForm');
     const submitBtn = document.getElementById('submitBtn');
     const formMessage = document.getElementById('formMessage');
     const refreshBtn = document.getElementById('refreshBtn');
+    const refreshAgentsBtn = document.getElementById('refreshAgentsBtn');
 
     createTunnelForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -117,8 +142,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const tunnels = data.database_tunnels || [];
 
             if (tunnels.length === 0) {
-                // Changed colspan to 6 to account for the new column
-                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No tunnels found.</td></tr>`;
+                // Changed colspan to account for the new column
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No tunnels found.</td></tr>`;
                 return;
             }
 
@@ -137,8 +162,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const source = `${t.src_agent} (${t.src_region}) :${t.src_port}`;
                 const dest = `${t.dst_agent} (${t.dst_region}) -> ${t.dst_host}:${t.dst_port}`;
 
-                // Status mapping (since the DB might not have live status unless we query the plugin)
-                const statusBadge = `<span class="status status-running">Active (DB)</span>`;
+                // Read live status if we fetched it (only available if live_cresco_tunnels matched)
+                let statusBadge = `<span class="status status-running">Active (DB)</span>`;
+                
+                // Let's find if there is a live cresco tunnel matching our stunnel_id
+                if (data.live_cresco_tunnels && data.live_cresco_tunnels.length > 0) {
+                    const liveTunnel = data.live_cresco_tunnels.find(lt => lt.stunnel_id === t.stunnel_id);
+                    if (liveTunnel) {
+                         // The live API returns it running if it's listed.
+                         statusBadge = `<span class="status status-running">Active (Live)</span>`;
+                    } else {
+                         statusBadge = `<span class="status" style="background-color:#4a5568;">Inactive (Live)</span>`;
+                    }
+                }
 
                 tr.innerHTML = `
                     <td title="${t.stunnel_id}">${shortId}</td>
@@ -146,15 +182,275 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${source}</td>
                     <td>${dest}</td>
                     <td>${t.buffer_size}</td>
-                    <td>${statusBadge}</td>
+                    <td id="status-${t.stunnel_id}">${statusBadge}</td>
+                    <td>
+                        <div style="display: flex; gap: 5px;">
+                            <button class="btn btn-secondary btn-sm status-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Status</button>
+                            <button class="btn btn-secondary btn-sm config-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Config</button>
+                            <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_plugin_id}">Delete</button>
+                        </div>
+                    </td>
                 `;
                 tbody.appendChild(tr);
+
+                // Now that the row is added, asynchronously check the live status if we have the plugin ID
+                // (This avoids waiting for all status checks before rendering the table)
+                if (t.stunnel_plugin_id && t.stunnel_plugin_id !== 'null') {
+                    fetch(`${API_URL}/tunnels/${t.stunnel_id}/status?src_region=${t.src_region}&src_agent=${t.src_agent}&src_plugin_id=${t.stunnel_plugin_id}`)
+                        .then(res => {
+                            if (!res.ok) throw new Error('Status fetch failed');
+                            return res.json();
+                        })
+                        .then(statusData => {
+                            const statusCell = document.getElementById(`status-${t.stunnel_id}`);
+                            if (statusCell) {
+                                // Assume it's active if we get a valid config dictionary back, 
+                                // or parse the response if status Data returns a boolean/string
+                                statusCell.innerHTML = `<span class="status status-running">Online</span>`;
+                            }
+                        })
+                        .catch(err => {
+                            const statusCell = document.getElementById(`status-${t.stunnel_id}`);
+                            if (statusCell) {
+                                statusCell.innerHTML = `<span class="status" style="background-color:#4a5568;">Offline</span>`;
+                            }
+                        });
+                }
+            });
+
+            // Attach event listeners for delete buttons
+            document.querySelectorAll('.delete-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const tunnelId = e.target.getAttribute('data-id');
+                    if (confirm(`Are you sure you want to delete tunnel ${tunnelId}?`)) {
+                        await deleteTunnel(tunnelId);
+                    }
+                });
+            });
+
+            // Info Modal Elements
+            const infoModal = document.getElementById('infoModal');
+            const infoModalTitle = document.getElementById('infoModalTitle');
+            const infoModalBody = document.getElementById('infoModalBody');
+            const closeInfoModalBtn = document.getElementById('closeInfoModalBtn');
+
+            closeInfoModalBtn.addEventListener('click', () => {
+                infoModal.classList.add('hidden');
+            });
+
+            infoModal.addEventListener('click', (e) => {
+                if (e.target === infoModal) {
+                    infoModal.classList.add('hidden');
+                }
+            });
+
+            // Attach event listeners for status buttons
+            document.querySelectorAll('.status-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const tunnelId = e.target.getAttribute('data-id');
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    const plugin = e.target.getAttribute('data-plugin');
+                    
+                    if (!plugin || plugin === 'null') {
+                        alert("Plugin ID is required to fetch status");
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/status?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
+                        if (!response.ok) throw new Error('Failed to fetch status');
+                        const data = await response.json();
+                        
+                        infoModalTitle.textContent = `Status: ${tunnelId}`;
+                        infoModalBody.textContent = JSON.stringify(data.status, null, 2);
+                        infoModal.classList.remove('hidden');
+                    } catch (error) {
+                        alert(`Error fetching status: ${error.message}`);
+                    }
+                });
+            });
+
+            // Attach event listeners for config buttons
+            document.querySelectorAll('.config-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const tunnelId = e.target.getAttribute('data-id');
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    const plugin = e.target.getAttribute('data-plugin');
+                    
+                    if (!plugin || plugin === 'null') {
+                        alert("Plugin ID is required to fetch config");
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/config?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
+                        if (!response.ok) throw new Error('Failed to fetch config');
+                        const data = await response.json();
+                        
+                        infoModalTitle.textContent = `Config: ${tunnelId}`;
+                        infoModalBody.textContent = JSON.stringify(data.config, null, 2);
+                        infoModal.classList.remove('hidden');
+                    } catch (error) {
+                        alert(`Error fetching config: ${error.message}`);
+                    }
+                });
             });
 
         } catch (error) {
             console.error('Error fetching tunnels:', error);
-            // Changed colspan to 6 here as well
-            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Failed to load tunnels. Ensure API is reachable at ${API_URL}.</td></tr>`;
+            // Changed colspan to 7 here as well
+            tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Failed to load tunnels. Ensure API is reachable at ${API_URL}.</td></tr>`;
+        }
+    }
+
+    // Handle Agent Refresh
+    if (refreshAgentsBtn) {
+        refreshAgentsBtn.addEventListener('click', () => {
+            fetchAgents();
+        });
+    }
+
+    // Fetch and Display Agents
+    async function fetchAgents() {
+        const tbody = document.getElementById('agentsBody');
+        if (!tbody) return;
+
+        try {
+            tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">Loading agents...</td></tr>`;
+            const response = await fetch(`${API_URL}/agents`);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || 'Failed to fetch agents');
+            }
+
+            tbody.innerHTML = '';
+            
+            if (!data.agents || data.agents.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">No agents found</td></tr>`;
+                return;
+            }
+
+            data.agents.forEach(agent => {
+                const tr = document.createElement('tr');
+                
+                // Parse status description
+                let statusLabel = `<span class="status" style="background-color:#4a5568;">Unknown</span>`;
+                if (agent.status_desc) {
+                    try {
+                        const parsedStatus = JSON.parse(agent.status_desc);
+                        if (parsedStatus.mode === 'GLOBAL') {
+                             statusLabel = `<span class="status status-running">Global Controller</span>`;
+                        } else {
+                             statusLabel = `<span class="status status-running">Online</span>`;
+                        }
+                    } catch (e) {
+                         statusLabel = `<span class="status" style="background-color:#4a5568;">Offline</span>`;
+                    }
+                }
+
+                tr.innerHTML = `
+                    <td>${agent.region_id}</td>
+                    <td>${agent.agent_id}</td>
+                    <td>${statusLabel}</td>
+                    <td>${agent.environment || 'N/A'}</td>
+                    <td>
+                        <button class="btn btn-secondary btn-sm restart-btn" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Restart</button>
+                        <button class="btn btn-danger btn-sm stop-btn" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Stop</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // Attach event listeners for restart buttons
+            document.querySelectorAll('.restart-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    if (confirm(`Are you sure you want to restart agent ${region}/${agent}?`)) {
+                        await restartAgent(region, agent);
+                    }
+                });
+            });
+
+            // Attach event listeners for stop buttons
+            document.querySelectorAll('.stop-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    if (confirm(`Are you sure you want to stop agent ${region}/${agent}? This action may disconnect tunnels passing through it.`)) {
+                        await stopAgent(region, agent);
+                    }
+                });
+            });
+
+        } catch (error) {
+            console.error('Error fetching agents:', error);
+            tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">Failed to load agents. Ensure API is reachable at ${API_URL}.</td></tr>`;
+        }
+    }
+
+    // Function to restart an agent
+    async function restartAgent(region, agent) {
+        try {
+            const response = await fetch(`${API_URL}/agents/${region}/${agent}/restart`, {
+                method: 'POST',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to restart agent');
+            }
+            
+            alert(`Restart command sent to agent ${region}/${agent}.`);
+            // Optionally fetch agents again after a slight delay
+            setTimeout(fetchAgents, 2000); 
+        } catch (error) {
+            console.error('Error restarting agent:', error);
+            alert(`Error restarting agent: ${error.message}`);
+        }
+    }
+
+    // Function to stop an agent
+    async function stopAgent(region, agent) {
+        try {
+            const response = await fetch(`${API_URL}/agents/${region}/${agent}/stop`, {
+                method: 'POST',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to stop agent');
+            }
+            
+            alert(`Stop command sent to agent ${region}/${agent}.`);
+            // Optionally fetch agents again after a slight delay
+            setTimeout(fetchAgents, 2000); 
+        } catch (error) {
+            console.error('Error stopping agent:', error);
+            alert(`Error stopping agent: ${error.message}`);
+        }
+    }
+
+    // Function to delete a tunnel
+    async function deleteTunnel(tunnelId) {
+        try {
+            const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
+                method: 'DELETE',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to delete tunnel');
+            }
+            
+            alert(`Tunnel ${tunnelId} deleted successfully.`);
+            fetchTunnels(); // Refresh the list
+        } catch (error) {
+            console.error('Error deleting tunnel:', error);
+            alert(`Error deleting tunnel: ${error.message}`);
         }
     }
 

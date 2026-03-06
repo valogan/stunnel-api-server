@@ -22,6 +22,9 @@ logger = logging.getLogger("api_server")
 # Global instances
 cresco_client = None
 stunnel_manager = None
+proxy_region = None
+proxy_agent = None
+proxy_host = None
 
 # --- Lifespan & Initialization ---
 @asynccontextmanager
@@ -39,6 +42,17 @@ async def lifespan(app: FastAPI):
     except configparser.NoSectionError as e:
         logger.error("config.ini missing 'general' section or required keys. Ensure config.ini is present.")
         raise
+        
+    global proxy_region, proxy_agent, proxy_host
+    try:
+        proxy_region = config.get('proxy', 'region')
+        proxy_agent = config.get('proxy', 'agent')
+        proxy_host = config.get('proxy', 'host', fallback='localhost')
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        logger.error("config.ini missing 'proxy' section or required keys. Using defaults.")
+        proxy_region = ""
+        proxy_agent = ""
+        proxy_host = "localhost"
     
     # 2. Connect to Cresco
     cresco_client = clientlib(host, port, service_key)
@@ -101,6 +115,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
+    logger.info(f"Headers: {request.headers}")
+    try:
+        response = await call_next(request)
+        logger.info(f"Response status: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.error(f"Request failed: {e}", exc_info=True)
+        raise
+
 # --- Define Pydantic Models for Input ---
 class TunnelCreateRequest(BaseModel):
     src_region: str
@@ -121,14 +147,15 @@ def read_root():
 @app.post("/tunnels")
 def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     """
-    Launch a new tunnel between a source node and a destination node.
+    Launch a new direct tunnel between a source node and a destination node.
     """
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
          
-    stunnel_id = str(uuid.uuid1())
+    tunnel_id = str(uuid.uuid1())
+    
     response = stunnel_manager.create_tunnel(
-        stunnel_id=stunnel_id,
+        stunnel_id=tunnel_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
         src_port=req.src_port,
@@ -139,38 +166,13 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
         buffer_size=req.buffer_size
     )
 
-    stunnel_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
-    
-    # get list of tunnels
-    tunnel_list = stunnel_manager.get_tunnel_list(req.src_region, req.src_agent, stunnel_plugin_id)
-
-    # iterate tunnels
-    if tunnel_list:
-        for stunnel in tunnel_list:
-            # get id from list
-            stunnel_id = stunnel['stunnel_id']
-            # get status from list
-            stunnel_status = stunnel['status']
-            logger.info(stunnel_id)
-            logger.info(stunnel_status)
-
-            # get status
-            returned_tunnel_status = stunnel_manager.get_tunnel_status(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
-            logger.info(returned_tunnel_status)
-
-            #get the original config that should match saved_stunnel_config
-            returned_stunnel_config = stunnel_manager.get_tunnel_config(req.src_region, req.src_agent, stunnel_plugin_id, stunnel_id)
-            logger.info(returned_stunnel_config)
-    else:
-        raise HTTPException(status_code=400, detail="Failed to create tunnel. Make sure your cresco agent is up to date.")
-        
-    
     if response is None:
-        raise HTTPException(status_code=400, detail="Failed to create tunnel. Verify agents and plugins.")
-        
-    # Persist to database
+        raise HTTPException(status_code=400, detail="Failed to create direct tunnel. Verify agents and plugins.")
+
+    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+
     db_tunnel = TunnelRecord(
-        stunnel_id=stunnel_id,
+        stunnel_id=tunnel_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
         src_port=req.src_port,
@@ -179,16 +181,111 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
         dst_host=req.dst_host,
         dst_port=req.dst_port,
         buffer_size=req.buffer_size,
-        stunnel_plugin_id=stunnel_plugin_id
+        stunnel_plugin_id=src_plugin_id
     )
     db.add(db_tunnel)
     db.commit()
     db.refresh(db_tunnel)
         
-    return {"message": f"Tunnel {stunnel_id} created successfully.", "data": response}
+    return {
+        "message": f"Direct Tunnel {tunnel_id} created successfully.", 
+        "data": response
+    }
+
+@app.post("/tunnels-proxy")
+def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db)):
+    """
+    Launch a new tunnel between a source node and a destination node.
+    """
+    if not stunnel_manager:
+         raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
+         
+    if not proxy_region or not proxy_agent:
+        raise HTTPException(status_code=500, detail="Proxy node is not configured in config.ini")
+
+    import random
+    proxy_port = str(random.randint(10000, 60000))
+         
+    hop1_id = str(uuid.uuid1())
+    hop2_id = str(uuid.uuid1())
+    
+    # Hop 1: Source to Proxy
+    response_hop1 = stunnel_manager.create_tunnel(
+        stunnel_id=hop1_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=req.src_port,
+        dst_region=proxy_region,
+        dst_agent=proxy_agent,
+        dst_host=proxy_host,
+        dst_port=proxy_port,
+        buffer_size=req.buffer_size
+    )
+
+    # Hop 2: Proxy to Destination
+    response_hop2 = stunnel_manager.create_tunnel(
+        stunnel_id=hop2_id,
+        src_region=proxy_region,
+        src_agent=proxy_agent,
+        src_port=proxy_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port,
+        buffer_size=req.buffer_size
+    )
+
+    if response_hop1 is None or response_hop2 is None:
+        raise HTTPException(status_code=400, detail="Failed to create proxy tunnel hops. Verify agents and plugins.")
+
+    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    proxy_plugin_id = stunnel_manager.find_existing_stunnel_plugin(proxy_region, proxy_agent)
+
+    # Persist Hop 1 to DB
+    db_tunnel_hop1 = TunnelRecord(
+        stunnel_id=hop1_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=req.src_port,
+        dst_region=proxy_region,
+        dst_agent=proxy_agent,
+        dst_host=proxy_host,
+        dst_port=proxy_port,
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=src_plugin_id
+    )
+    db.add(db_tunnel_hop1)
+
+    # Persist Hop 2 to DB
+    db_tunnel_hop2 = TunnelRecord(
+        stunnel_id=hop2_id,
+        src_region=proxy_region,
+        src_agent=proxy_agent,
+        src_port=proxy_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port,
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=proxy_plugin_id
+    )
+    db.add(db_tunnel_hop2)
+    
+    db.commit()
+    db.refresh(db_tunnel_hop1)
+    db.refresh(db_tunnel_hop2)
+        
+    return {
+        "message": f"Proxy Tunnels {hop1_id} and {hop2_id} created successfully.", 
+        "data": {
+            "hop1": response_hop1,
+            "hop2": response_hop2
+        }
+    }
 
 
 @app.options("/tunnels")
+@app.options("/tunnels-proxy")
 async def tunnels_preflight(request: Request):
     """Handle CORS preflight requests for /tunnels explicitly.
     This ensures OPTIONS requests receive the appropriate CORS headers
@@ -287,6 +384,135 @@ def get_tunnel_status(
         raise HTTPException(status_code=404, detail=f"No status found for tunnel {stunnel_id}.")
         
     return {"stunnel_id": stunnel_id, "status": status}
+
+
+@app.get("/tunnels/{stunnel_id}/config")
+def get_tunnel_config(
+    stunnel_id: str,
+    src_region: str = Query(..., description="The source region of the stunnel plugin"),
+    src_agent: str = Query(..., description="The source agent of the stunnel plugin"),
+    src_plugin_id: str = Query(..., description="The ID of the source stunnel plugin (e.g. system-io.cresco.stunnel...)")
+):
+    """
+    Retrieve the configuration of a specific tunnel by its ID.
+    Requires specifying the overarching source node and plugin ID.
+    """
+    if not stunnel_manager:
+         raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
+         
+    config = stunnel_manager.get_tunnel_config(
+        src_region=src_region,
+        src_agent=src_agent,
+        src_plugin_id=src_plugin_id,
+        stunnel_id=stunnel_id
+    )
+    
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"No config found for tunnel {stunnel_id}.")
+        
+    return {"stunnel_id": stunnel_id, "config": config}
+
+    
+@app.delete("/tunnels/{stunnel_id}")
+def delete_tunnel(
+    stunnel_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Remove a tunnel from the Cresco global controller and database by its ID.
+    Note: The stunnel_id here must correspond to the pipeline ID assigned by Cresco.
+    """
+    logger.info(f"--- ENTERING delete_tunnel(stunnel_id='{stunnel_id}') ---")
+    if not cresco_client:
+         logger.error("Cresco client not connected!")
+         raise HTTPException(status_code=500, detail="Cresco client not connected.")
+         
+    try:
+        logger.info(f"Calling cresco_client.globalcontroller.remove_pipeline('{stunnel_id}')")
+        response = cresco_client.globalcontroller.remove_pipeline(stunnel_id)
+        logger.info(f"remove_pipeline response: {response}")
+        
+        # Optionally remove from database to keep it clean
+        logger.info("Querying local DB for tunnel record...")
+        db_tunnel = db.query(TunnelRecord).filter(
+            (TunnelRecord.stunnel_id == stunnel_id) | 
+            (TunnelRecord.stunnel_plugin_id == stunnel_id)
+        ).first()
+        
+        if db_tunnel:
+            logger.info(f"Found record in DB: stunnel_id={db_tunnel.stunnel_id}, plugin_id={db_tunnel.stunnel_plugin_id}. Deleting...")
+            dst_region = db_tunnel.dst_region
+            dst_agent = db_tunnel.dst_agent
+            db.delete(db_tunnel)
+            db.commit()
+            logger.info("DB record deleted.")
+            
+            # Restart the destination agent as requested
+            try:
+                logger.info(f"Restarting destination agent {dst_region}/{dst_agent}...")
+                cresco_client.admin.restartframework(dst_region, dst_agent)
+                logger.info("Restart command sent.")
+            except Exception as e:
+                logger.error(f"Failed to restart destination agent {dst_region}/{dst_agent}: {e}")
+        else:
+            logger.warning(f"No corresponding record found in local DB for '{stunnel_id}'.")
+            
+        logger.info("--- EXITING delete_tunnel (Success) ---")
+        return {"stunnel_id": stunnel_id, "status": "Request sent", "response": response}
+    except Exception as e:
+        logger.error(f"Failed to delete tunnel {stunnel_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")
+
+
+@app.post("/agents/{region}/{agent}/restart")
+def restart_agent(region: str, agent: str):
+    """
+    Restart the Cresco framework on a specific agent.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+    
+    try:
+        logger.info(f"Restarting agent {region}/{agent} via API...")
+        cresco_client.admin.restartframework(region, agent)
+        return {"message": f"Restart command sent to agent {region}/{agent}"}
+    except Exception as e:
+        logger.error(f"Failed to restart agent {region}/{agent}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to restart agent: {str(e)}")
+
+@app.post("/agents/{region}/{agent}/stop")
+def stop_agent(region: str, agent: str):
+    """
+    Stop the Cresco controller on a specific agent.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+    
+    try:
+        logger.info(f"Stopping agent {region}/{agent} via API...")
+        cresco_client.admin.stopcontroller(region, agent)
+        return {"message": f"Stop command sent to agent {region}/{agent}"}
+    except Exception as e:
+        logger.error(f"Failed to stop agent {region}/{agent}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop agent: {str(e)}")
+
+@app.get("/agents")
+def get_agents():
+    """
+    Retrieve a list of agents from the Cresco global controller.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+        
+    try:
+        logger.info("Fetching agent list from Cresco global controller...")
+        agents = cresco_client.globalcontroller.get_agent_list()
+        # Ensure we return valid JSON (list of dicts typically)
+        return {"agents": agents}
+    except Exception as e:
+        logger.error(f"Failed to fetch agent list: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch agents: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
