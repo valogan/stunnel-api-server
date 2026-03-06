@@ -115,6 +115,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
+    logger.info(f"Headers: {request.headers}")
+    try:
+        response = await call_next(request)
+        logger.info(f"Response status: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.error(f"Request failed: {e}", exc_info=True)
+        raise
+
 # --- Define Pydantic Models for Input ---
 class TunnelCreateRequest(BaseModel):
     src_region: str
@@ -410,24 +422,35 @@ def delete_tunnel(
     Remove a tunnel from the Cresco global controller and database by its ID.
     Note: The stunnel_id here must correspond to the pipeline ID assigned by Cresco.
     """
+    logger.info(f"--- ENTERING delete_tunnel(stunnel_id='{stunnel_id}') ---")
     if not cresco_client:
+         logger.error("Cresco client not connected!")
          raise HTTPException(status_code=500, detail="Cresco client not connected.")
          
     try:
+        logger.info(f"Calling cresco_client.globalcontroller.remove_pipeline('{stunnel_id}')")
         response = cresco_client.globalcontroller.remove_pipeline(stunnel_id)
+        logger.info(f"remove_pipeline response: {response}")
         
         # Optionally remove from database to keep it clean
+        logger.info("Querying local DB for tunnel record...")
         db_tunnel = db.query(TunnelRecord).filter(
             (TunnelRecord.stunnel_id == stunnel_id) | 
             (TunnelRecord.stunnel_plugin_id == stunnel_id)
         ).first()
+        
         if db_tunnel:
+            logger.info(f"Found record in DB: stunnel_id={db_tunnel.stunnel_id}, plugin_id={db_tunnel.stunnel_plugin_id}. Deleting...")
             db.delete(db_tunnel)
             db.commit()
+            logger.info("DB record deleted.")
+        else:
+            logger.warning(f"No corresponding record found in local DB for '{stunnel_id}'.")
             
+        logger.info("--- EXITING delete_tunnel (Success) ---")
         return {"stunnel_id": stunnel_id, "status": "Request sent", "response": response}
     except Exception as e:
-        logger.error(f"Failed to delete tunnel {stunnel_id}: {e}")
+        logger.error(f"Failed to delete tunnel {stunnel_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")
 
 if __name__ == "__main__":
