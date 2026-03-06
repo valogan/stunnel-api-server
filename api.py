@@ -373,6 +373,33 @@ def get_tunnel_status(
         
     return {"stunnel_id": stunnel_id, "status": status}
 
+
+@app.get("/tunnels/{stunnel_id}/config")
+def get_tunnel_config(
+    stunnel_id: str,
+    src_region: str = Query(..., description="The source region of the stunnel plugin"),
+    src_agent: str = Query(..., description="The source agent of the stunnel plugin"),
+    src_plugin_id: str = Query(..., description="The ID of the source stunnel plugin (e.g. system-io.cresco.stunnel...)")
+):
+    """
+    Retrieve the configuration of a specific tunnel by its ID.
+    Requires specifying the overarching source node and plugin ID.
+    """
+    if not stunnel_manager:
+         raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
+         
+    config = stunnel_manager.get_tunnel_config(
+        src_region=src_region,
+        src_agent=src_agent,
+        src_plugin_id=src_plugin_id,
+        stunnel_id=stunnel_id
+    )
+    
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"No config found for tunnel {stunnel_id}.")
+        
+    return {"stunnel_id": stunnel_id, "config": config}
+
     
 @app.delete("/tunnels/{stunnel_id}")
 def delete_tunnel(

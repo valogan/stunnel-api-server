@@ -148,7 +148,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${t.buffer_size}</td>
                     <td>${statusBadge}</td>
                     <td>
-                        <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_id}">Delete</button>
+                        <div style="display: flex; gap: 5px;">
+                            <button class="btn btn-secondary btn-sm status-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Status</button>
+                            <button class="btn btn-secondary btn-sm config-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Config</button>
+                            <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_id}">Delete</button>
+                        </div>
                     </td>
                 `;
                 tbody.appendChild(tr);
@@ -160,6 +164,76 @@ document.addEventListener('DOMContentLoaded', () => {
                     const tunnelId = e.target.getAttribute('data-id');
                     if (confirm(`Are you sure you want to delete tunnel ${tunnelId}?`)) {
                         await deleteTunnel(tunnelId);
+                    }
+                });
+            });
+
+            // Info Modal Elements
+            const infoModal = document.getElementById('infoModal');
+            const infoModalTitle = document.getElementById('infoModalTitle');
+            const infoModalBody = document.getElementById('infoModalBody');
+            const closeInfoModalBtn = document.getElementById('closeInfoModalBtn');
+
+            closeInfoModalBtn.addEventListener('click', () => {
+                infoModal.classList.add('hidden');
+            });
+
+            infoModal.addEventListener('click', (e) => {
+                if (e.target === infoModal) {
+                    infoModal.classList.add('hidden');
+                }
+            });
+
+            // Attach event listeners for status buttons
+            document.querySelectorAll('.status-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const tunnelId = e.target.getAttribute('data-id');
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    const plugin = e.target.getAttribute('data-plugin');
+                    
+                    if (!plugin || plugin === 'null') {
+                        alert("Plugin ID is required to fetch status");
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/status?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
+                        if (!response.ok) throw new Error('Failed to fetch status');
+                        const data = await response.json();
+                        
+                        infoModalTitle.textContent = `Status: ${tunnelId}`;
+                        infoModalBody.textContent = JSON.stringify(data.status, null, 2);
+                        infoModal.classList.remove('hidden');
+                    } catch (error) {
+                        alert(`Error fetching status: ${error.message}`);
+                    }
+                });
+            });
+
+            // Attach event listeners for config buttons
+            document.querySelectorAll('.config-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const tunnelId = e.target.getAttribute('data-id');
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    const plugin = e.target.getAttribute('data-plugin');
+                    
+                    if (!plugin || plugin === 'null') {
+                        alert("Plugin ID is required to fetch config");
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/config?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
+                        if (!response.ok) throw new Error('Failed to fetch config');
+                        const data = await response.json();
+                        
+                        infoModalTitle.textContent = `Config: ${tunnelId}`;
+                        infoModalBody.textContent = JSON.stringify(data.config, null, 2);
+                        infoModal.classList.remove('hidden');
+                    } catch (error) {
+                        alert(`Error fetching config: ${error.message}`);
                     }
                 });
             });
