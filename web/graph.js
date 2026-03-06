@@ -105,10 +105,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Edge
             edgesData.push({
+                id: t.stunnel_id, // Store ID directly as the edge string ID
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
                 title: `Tunnel ID: ${t.stunnel_id}\nBuffer: ${t.buffer_size}`,
+                stunnel_id: t.stunnel_id, // Store as property
                 arrows: 'to',
                 color: { color: '#3b82f6', highlight: '#60a5fa' },
                 font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' }
@@ -134,9 +136,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const container = document.getElementById('mynetwork');
 
+        const edgesDataset = new vis.DataSet(edgesData);
         const data = {
             nodes: new vis.DataSet(nodes),
-            edges: new vis.DataSet(edgesData)
+            edges: edgesDataset
         };
 
         const options = {
@@ -193,6 +196,40 @@ document.addEventListener('DOMContentLoaded', () => {
         network.on("deselectNode", function(params) {
             network.disableEditMode();
         });
+
+        // Handle edge clicks for deletion
+        network.on("selectEdge", async function(params) {
+            // Only trigger if an edge is clicked without a node being selected
+            if (params.nodes.length === 0 && params.edges.length === 1) {
+                const edgeId = params.edges[0];
+                const edge = edgesDataset.get(edgeId);
+                
+                if (edge && edge.stunnel_id) {
+                    if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
+                        await deleteTunnelFromGraph(edge.stunnel_id);
+                    }
+                }
+            }
+        });
+    }
+
+    async function deleteTunnelFromGraph(tunnelId) {
+        try {
+            const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
+                method: 'DELETE',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to delete tunnel');
+            }
+            
+            // Refresh graph entirely
+            await fetchDataAndDraw();
+        } catch (error) {
+            console.error('Error deleting tunnel:', error);
+            alert(`Error deleting tunnel: ${error.message}`);
+        }
     }
 
     // Modal Button Handlers
