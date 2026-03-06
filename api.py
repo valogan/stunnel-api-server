@@ -480,6 +480,24 @@ def restart_agent(region: str, agent: str):
         logger.error(f"Failed to restart agent {region}/{agent}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to restart agent: {str(e)}")
 
+@app.get("/agents")
+def get_agents():
+    """
+    Retrieve a list of agents from the Cresco global controller.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+        
+    try:
+        logger.info("Fetching agent list from Cresco global controller...")
+        agents = cresco_client.globalcontroller.get_agent_list()
+        # Ensure we return valid JSON (list of dicts typically)
+        return {"agents": agents}
+    except Exception as e:
+        logger.error(f"Failed to fetch agent list: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch agents: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     # Running programmatically if file is executed directly
