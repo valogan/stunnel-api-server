@@ -480,6 +480,22 @@ def restart_agent(region: str, agent: str):
         logger.error(f"Failed to restart agent {region}/{agent}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to restart agent: {str(e)}")
 
+@app.post("/agents/{region}/{agent}/stop")
+def stop_agent(region: str, agent: str):
+    """
+    Stop the Cresco controller on a specific agent.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+    
+    try:
+        logger.info(f"Stopping agent {region}/{agent} via API...")
+        cresco_client.admin.stopcontroller(region, agent)
+        return {"message": f"Stop command sent to agent {region}/{agent}"}
+    except Exception as e:
+        logger.error(f"Failed to stop agent {region}/{agent}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop agent: {str(e)}")
+
 @app.get("/agents")
 def get_agents():
     """

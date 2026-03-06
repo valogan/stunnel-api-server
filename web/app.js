@@ -358,6 +358,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${agent.environment || 'N/A'}</td>
                     <td>
                         <button class="btn btn-secondary btn-sm restart-btn" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Restart</button>
+                        <button class="btn btn-danger btn-sm stop-btn" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Stop</button>
                     </td>
                 `;
                 tbody.appendChild(tr);
@@ -370,6 +371,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     const agent = e.target.getAttribute('data-agent');
                     if (confirm(`Are you sure you want to restart agent ${region}/${agent}?`)) {
                         await restartAgent(region, agent);
+                    }
+                });
+            });
+
+            // Attach event listeners for stop buttons
+            document.querySelectorAll('.stop-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const region = e.target.getAttribute('data-region');
+                    const agent = e.target.getAttribute('data-agent');
+                    if (confirm(`Are you sure you want to stop agent ${region}/${agent}? This action may disconnect tunnels passing through it.`)) {
+                        await stopAgent(region, agent);
                     }
                 });
             });
@@ -398,6 +410,27 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error('Error restarting agent:', error);
             alert(`Error restarting agent: ${error.message}`);
+        }
+    }
+
+    // Function to stop an agent
+    async function stopAgent(region, agent) {
+        try {
+            const response = await fetch(`${API_URL}/agents/${region}/${agent}/stop`, {
+                method: 'POST',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to stop agent');
+            }
+            
+            alert(`Stop command sent to agent ${region}/${agent}.`);
+            // Optionally fetch agents again after a slight delay
+            setTimeout(fetchAgents, 2000); 
+        } catch (error) {
+            console.error('Error stopping agent:', error);
+            alert(`Error stopping agent: ${error.message}`);
         }
     }
 
