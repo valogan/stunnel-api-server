@@ -441,9 +441,19 @@ def delete_tunnel(
         
         if db_tunnel:
             logger.info(f"Found record in DB: stunnel_id={db_tunnel.stunnel_id}, plugin_id={db_tunnel.stunnel_plugin_id}. Deleting...")
+            dst_region = db_tunnel.dst_region
+            dst_agent = db_tunnel.dst_agent
             db.delete(db_tunnel)
             db.commit()
             logger.info("DB record deleted.")
+            
+            # Restart the destination agent as requested
+            try:
+                logger.info(f"Restarting destination agent {dst_region}/{dst_agent}...")
+                cresco_client.admin.restartframework(dst_region, dst_agent)
+                logger.info("Restart command sent.")
+            except Exception as e:
+                logger.error(f"Failed to restart destination agent {dst_region}/{dst_agent}: {e}")
         else:
             logger.warning(f"No corresponding record found in local DB for '{stunnel_id}'.")
             
@@ -452,6 +462,23 @@ def delete_tunnel(
     except Exception as e:
         logger.error(f"Failed to delete tunnel {stunnel_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")
+
+
+@app.post("/agents/{region}/{agent}/restart")
+def restart_agent(region: str, agent: str):
+    """
+    Restart the Cresco framework on a specific agent.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+    
+    try:
+        logger.info(f"Restarting agent {region}/{agent} via API...")
+        cresco_client.admin.restartframework(region, agent)
+        return {"message": f"Restart command sent to agent {region}/{agent}"}
+    except Exception as e:
+        logger.error(f"Failed to restart agent {region}/{agent}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to restart agent: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
