@@ -117,8 +117,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const tunnels = data.database_tunnels || [];
 
             if (tunnels.length === 0) {
-                // Changed colspan to 6 to account for the new column
-                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No tunnels found.</td></tr>`;
+                // Changed colspan to account for the new column
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No tunnels found.</td></tr>`;
                 return;
             }
 
@@ -147,14 +147,47 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${dest}</td>
                     <td>${t.buffer_size}</td>
                     <td>${statusBadge}</td>
+                    <td>
+                        <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_id}">Delete</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
 
+            // Attach event listeners for delete buttons
+            document.querySelectorAll('.delete-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const tunnelId = e.target.getAttribute('data-id');
+                    if (confirm(`Are you sure you want to delete tunnel ${tunnelId}?`)) {
+                        await deleteTunnel(tunnelId);
+                    }
+                });
+            });
+
         } catch (error) {
             console.error('Error fetching tunnels:', error);
-            // Changed colspan to 6 here as well
-            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Failed to load tunnels. Ensure API is reachable at ${API_URL}.</td></tr>`;
+            // Changed colspan to 7 here as well
+            tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Failed to load tunnels. Ensure API is reachable at ${API_URL}.</td></tr>`;
+        }
+    }
+
+    // Function to delete a tunnel
+    async function deleteTunnel(tunnelId) {
+        try {
+            const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
+                method: 'DELETE',
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.detail || 'Failed to delete tunnel');
+            }
+            
+            alert(`Tunnel ${tunnelId} deleted successfully.`);
+            fetchTunnels(); // Refresh the list
+        } catch (error) {
+            console.error('Error deleting tunnel:', error);
+            alert(`Error deleting tunnel: ${error.message}`);
         }
     }
 

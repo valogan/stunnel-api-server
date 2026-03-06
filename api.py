@@ -135,6 +135,54 @@ def read_root():
 @app.post("/tunnels")
 def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     """
+    Launch a new direct tunnel between a source node and a destination node.
+    """
+    if not stunnel_manager:
+         raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
+         
+    tunnel_id = str(uuid.uuid1())
+    
+    response = stunnel_manager.create_tunnel(
+        stunnel_id=tunnel_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=req.src_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port,
+        buffer_size=req.buffer_size
+    )
+
+    if response is None:
+        raise HTTPException(status_code=400, detail="Failed to create direct tunnel. Verify agents and plugins.")
+
+    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+
+    db_tunnel = TunnelRecord(
+        stunnel_id=tunnel_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=req.src_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port,
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=src_plugin_id
+    )
+    db.add(db_tunnel)
+    db.commit()
+    db.refresh(db_tunnel)
+        
+    return {
+        "message": f"Direct Tunnel {tunnel_id} created successfully.", 
+        "data": response
+    }
+
+@app.post("/tunnels-proxy")
+def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db)):
+    """
     Launch a new tunnel between a source node and a destination node.
     """
     if not stunnel_manager:
@@ -225,6 +273,7 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
 
 
 @app.options("/tunnels")
+@app.options("/tunnels-proxy")
 async def tunnels_preflight(request: Request):
     """Handle CORS preflight requests for /tunnels explicitly.
     This ensures OPTIONS requests receive the appropriate CORS headers
@@ -323,6 +372,33 @@ def get_tunnel_status(
         raise HTTPException(status_code=404, detail=f"No status found for tunnel {stunnel_id}.")
         
     return {"stunnel_id": stunnel_id, "status": status}
+
+    
+@app.delete("/tunnels/{stunnel_id}")
+def delete_tunnel(
+    stunnel_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Remove a tunnel from the Cresco global controller and database by its ID.
+    Note: The stunnel_id here must correspond to the pipeline ID assigned by Cresco.
+    """
+    if not cresco_client:
+         raise HTTPException(status_code=500, detail="Cresco client not connected.")
+         
+    try:
+        response = cresco_client.globalcontroller.remove_pipeline(stunnel_id)
+        
+        # Optionally remove from database to keep it clean
+        db_tunnel = db.query(TunnelRecord).filter(TunnelRecord.stunnel_id == stunnel_id).first()
+        if db_tunnel:
+            db.delete(db_tunnel)
+            db.commit()
+            
+        return {"stunnel_id": stunnel_id, "status": "Request sent", "response": response}
+    except Exception as e:
+        logger.error(f"Failed to delete tunnel {stunnel_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
