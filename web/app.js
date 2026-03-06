@@ -137,8 +137,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const source = `${t.src_agent} (${t.src_region}) :${t.src_port}`;
                 const dest = `${t.dst_agent} (${t.dst_region}) -> ${t.dst_host}:${t.dst_port}`;
 
-                // Status mapping (since the DB might not have live status unless we query the plugin)
-                const statusBadge = `<span class="status status-running">Active (DB)</span>`;
+                // Read live status if we fetched it (only available if live_cresco_tunnels matched)
+                let statusBadge = `<span class="status status-running">Active (DB)</span>`;
+                
+                // Let's find if there is a live cresco tunnel matching our stunnel_id
+                if (data.live_cresco_tunnels && data.live_cresco_tunnels.length > 0) {
+                    const liveTunnel = data.live_cresco_tunnels.find(lt => lt.stunnel_id === t.stunnel_id);
+                    if (liveTunnel) {
+                         // The live API returns it running if it's listed.
+                         statusBadge = `<span class="status status-running">Active (Live)</span>`;
+                    } else {
+                         statusBadge = `<span class="status" style="background-color:#4a5568;">Inactive (Live)</span>`;
+                    }
+                }
 
                 tr.innerHTML = `
                     <td title="${t.stunnel_id}">${shortId}</td>
@@ -146,7 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${source}</td>
                     <td>${dest}</td>
                     <td>${t.buffer_size}</td>
-                    <td>${statusBadge}</td>
+                    <td id="status-${t.stunnel_id}">${statusBadge}</td>
                     <td>
                         <div style="display: flex; gap: 5px;">
                             <button class="btn btn-secondary btn-sm status-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Status</button>
@@ -156,6 +167,30 @@ document.addEventListener('DOMContentLoaded', () => {
                     </td>
                 `;
                 tbody.appendChild(tr);
+
+                // Now that the row is added, asynchronously check the live status if we have the plugin ID
+                // (This avoids waiting for all status checks before rendering the table)
+                if (t.stunnel_plugin_id && t.stunnel_plugin_id !== 'null') {
+                    fetch(`${API_URL}/tunnels/${t.stunnel_id}/status?src_region=${t.src_region}&src_agent=${t.src_agent}&src_plugin_id=${t.stunnel_plugin_id}`)
+                        .then(res => {
+                            if (!res.ok) throw new Error('Status fetch failed');
+                            return res.json();
+                        })
+                        .then(statusData => {
+                            const statusCell = document.getElementById(`status-${t.stunnel_id}`);
+                            if (statusCell) {
+                                // Assume it's active if we get a valid config dictionary back, 
+                                // or parse the response if status Data returns a boolean/string
+                                statusCell.innerHTML = `<span class="status status-running">Online</span>`;
+                            }
+                        })
+                        .catch(err => {
+                            const statusCell = document.getElementById(`status-${t.stunnel_id}`);
+                            if (statusCell) {
+                                statusCell.innerHTML = `<span class="status" style="background-color:#4a5568;">Offline</span>`;
+                            }
+                        });
+                }
             });
 
             // Attach event listeners for delete buttons
