@@ -417,7 +417,10 @@ def delete_tunnel(
         response = cresco_client.globalcontroller.remove_pipeline(stunnel_id)
         
         # Optionally remove from database to keep it clean
-        db_tunnel = db.query(TunnelRecord).filter(TunnelRecord.stunnel_id == stunnel_id).first()
+        db_tunnel = db.query(TunnelRecord).filter(
+            (TunnelRecord.stunnel_id == stunnel_id) | 
+            (TunnelRecord.stunnel_plugin_id == stunnel_id)
+        ).first()
         if db_tunnel:
             db.delete(db_tunnel)
             db.commit()

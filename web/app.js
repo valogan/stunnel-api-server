@@ -162,7 +162,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <div style="display: flex; gap: 5px;">
                             <button class="btn btn-secondary btn-sm status-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Status</button>
                             <button class="btn btn-secondary btn-sm config-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Config</button>
-                            <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_id}">Delete</button>
+                            <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_plugin_id}">Delete</button>
                         </div>
                     </td>
                 `;
