@@ -85,9 +85,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Assign colors based on metrics
         const getEdgeColor = (metrics) => {
-            if (!metrics || metrics.health === 'unknown') return { color: '#3b82f6', highlight: '#60a5fa' };
-            if (metrics.health === 'healthy') return { color: '#22c55e', highlight: '#4ade80' };
-            return { color: '#ef4444', highlight: '#f87171' }; // degraded
+            if (!metrics || metrics.health === 'unknown') return { color: '#3b82f6', highlight: '#60a5fa' }; // Blue
+            if (metrics.health === 'degraded') return { color: '#ef4444', highlight: '#f87171' }; // Red
+
+            // If healthy, check throughput
+            let bytesPerSec = 0;
+            if (metrics.bytes_msg && metrics.bytes_msg.includes('B/s')) {
+                bytesPerSec = parseInt(metrics.bytes_msg.replace(/,/g, '').split(' ')[0]) || 0;
+            }
+
+            if (bytesPerSec < 1000) {
+                return { color: '#9ca3af', highlight: '#d1d5db' }; // Gray (idle/low bandwidth)
+            } else {
+                return { color: '#22c55e', highlight: '#4ade80' }; // Green (active traffic)
+            }
         };
 
         // 2. Add Tunnels as edges (and missing nodes just in case)
@@ -117,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Edge
             edgesData.push({
-                id: t.stunnel_id, 
+                id: t.stunnel_id,
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
@@ -141,7 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Remove old nodes/edges
         const currentNodesIds = new Set(nodes.map(n => n.id));
         const currentEdgesIds = new Set(edgesData.map(e => e.id));
-        
+
         nodesDataset.forEach(n => { if (!currentNodesIds.has(n.id)) nodesDataset.remove(n.id); });
         edgesDataset.forEach(e => { if (!currentEdgesIds.has(e.id)) edgesDataset.remove(e.id); });
 
@@ -174,11 +185,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             callback(null);
                             return;
                         }
-                        
+
                         // Show Modal
                         document.getElementById('edgeSrcPort').value = '';
                         document.getElementById('edgeDstPort').value = '';
-                        
+
                         edgeModal.classList.remove('hidden');
                         edgeCreationCallback = {
                             edgeData: edgeData,
@@ -191,21 +202,21 @@ document.addEventListener('DOMContentLoaded', () => {
             network = new vis.Network(container, data, options);
 
             // Auto-enter Add Edge mode when clicking a node
-            network.on("selectNode", function(params) {
+            network.on("selectNode", function (params) {
                 network.addEdgeMode();
             });
-            
-            network.on("deselectNode", function(params) {
+
+            network.on("deselectNode", function (params) {
                 network.disableEditMode();
             });
 
             // Handle edge clicks for deletion
-            network.on("selectEdge", async function(params) {
+            network.on("selectEdge", async function (params) {
                 // Only trigger if an edge is clicked without a node being selected
                 if (params.nodes.length === 0 && params.edges.length === 1) {
                     const edgeId = params.edges[0];
                     const edge = edgesDataset.get(edgeId);
-                    
+
                     if (edge && edge.stunnel_id) {
                         if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
                             await deleteTunnelFromGraph(edge.stunnel_id);
@@ -222,12 +233,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
                 method: 'DELETE',
             });
-            
+
             if (!response.ok) {
                 const data = await response.json();
                 throw new Error(data.detail || 'Failed to delete tunnel');
             }
-            
+
             // Refresh graph entirely
             await fetchDataAndDraw();
         } catch (error) {
@@ -259,7 +270,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const edgeData = edgeCreationCallback.edgeData;
-        
+
         const srcNode = currentNodesMap.get(edgeData.from);
         const dstNode = currentNodesMap.get(edgeData.to);
 
@@ -295,7 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             edgeModal.classList.add('hidden');
-            
+
             // Refresh graph entirely
             await fetchDataAndDraw();
 
@@ -319,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial fetch
     fetchDataAndDraw();
-    
+
     // Auto-poll metrics every 5 seconds
     setInterval(fetchDataAndDraw, 5000);
 });
