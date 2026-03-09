@@ -35,7 +35,10 @@ logstreamer_instance = None
 metrics_worker_running = False
 
 def process_log_message(message: str):
-    logger.info(f"Processing log message: {message}")
+    # Skip noisy messages that aren't stunnel related
+    if "io.cresco.stunnel" not in message and "tunnel" not in message.lower():
+        return
+
     plugin_match = re.search(r'system-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', message)
     stunnel_id = None
     if plugin_match:
@@ -49,7 +52,7 @@ def process_log_message(message: str):
             
     if stunnel_id:
         if stunnel_id not in active_metrics_cache:
-            active_metrics_cache[stunnel_id] = {"health": "unknown", "bytes_msg": "", "last_updated": 0, "status_code": 10}
+            active_metrics_cache[stunnel_id] = {"health": "unknown", "bytes_msg": "0 B/s", "last_updated": 0, "status_code": 10}
             
         active_metrics_cache[stunnel_id]["last_updated"] = time.time()
         
@@ -59,17 +62,12 @@ def process_log_message(message: str):
         elif "Health check failed" in message or "timeout" in message.lower():
             active_metrics_cache[stunnel_id]["health"] = "degraded"
             active_metrics_cache[stunnel_id]["status_code"] = 50
-        elif "bytes" in message.lower() and "io.cresco.stunnel.performancemonitor" in message:
-            msg_body = message.split("] ")[-1].strip()
-            if "no bytes" in msg_body.lower():
-                active_metrics_cache[stunnel_id]["bytes_msg"] = "0 B/s"
-            else:
-                # Try to extract actual bytes transfer count
-                bytes_match = re.search(r'(\d+)\s*bytes', msg_body, re.IGNORECASE)
-                if bytes_match:
-                    active_metrics_cache[stunnel_id]["bytes_msg"] = f"{int(bytes_match.group(1))} B/s"
-                else:
-                    active_metrics_cache[stunnel_id]["bytes_msg"] = msg_body
+        elif "Performance:" in message and "bits/sec" in message:
+            perf_match = re.search(r'Performance:\s*(\d+)\s*bits/sec', message, re.IGNORECASE)
+            if perf_match:
+                bits_per_sec = int(perf_match.group(1))
+                bytes_per_sec = bits_per_sec // 8
+                active_metrics_cache[stunnel_id]["bytes_msg"] = f"{bytes_per_sec} B/s"
 
 def background_metrics_worker():
     global logstreamer_instance
