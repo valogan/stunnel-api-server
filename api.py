@@ -428,9 +428,20 @@ def get_tunnels(
     tunnels = query.all()
     
     tunnels_data = []
+    current_time = time.time()
     for t in tunnels:
         t_dict = {c.name: getattr(t, c.name) for c in t.__table__.columns}
-        t_dict["metrics"] = active_metrics_cache.get(t.stunnel_id, None)
+        
+        metrics = None
+        if t.stunnel_id in active_metrics_cache:
+            metrics = dict(active_metrics_cache[t.stunnel_id]) # Shallow copy
+            
+            # If no byte logs received in 10+ seconds, reset bandwidth to zero
+            last_bytes_time = metrics.get("last_updated_bytes", 0)
+            if current_time - last_bytes_time > 10:
+                metrics["bytes_msg"] = "0 B/s"
+                
+        t_dict["metrics"] = metrics
         tunnels_data.append(t_dict)
     
     # If the user also explicitly provided the plugin ID, try to get live Cresco status for them too
