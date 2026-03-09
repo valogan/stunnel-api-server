@@ -52,7 +52,7 @@ def process_log_message(message: str):
             
     if stunnel_id:
         if stunnel_id not in active_metrics_cache:
-            active_metrics_cache[stunnel_id] = {"health": "unknown", "bytes_msg": "0 B/s", "last_updated": 0, "status_code": 10}
+            active_metrics_cache[stunnel_id] = {"health": "unknown", "bytes_msg": "0 B/s", "last_updated": 0, "last_updated_bytes": 0, "status_code": 10}
             
         active_metrics_cache[stunnel_id]["last_updated"] = time.time()
         
@@ -68,6 +68,7 @@ def process_log_message(message: str):
                 bits_per_sec = int(perf_match.group(1))
                 bytes_per_sec = bits_per_sec // 8
                 active_metrics_cache[stunnel_id]["bytes_msg"] = f"{bytes_per_sec} B/s"
+                active_metrics_cache[stunnel_id]["last_updated_bytes"] = time.time()
 
 def background_metrics_worker():
     global logstreamer_instance
