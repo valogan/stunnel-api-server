@@ -226,7 +226,8 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
         for connection in list(self.active_connections):
@@ -254,8 +255,15 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
     tunnels_data = []
     current_time = time.time()
     
+    import datetime
     for t in tunnels:
-        t_dict = {c.name: getattr(t, c.name) for c in t.__table__.columns}
+        t_dict = {}
+        for c in t.__table__.columns:
+            val = getattr(t, c.name)
+            if isinstance(val, datetime.datetime):
+                val = val.isoformat()
+            t_dict[c.name] = val
+            
         metrics = None
         if t.stunnel_id in active_metrics_cache:
             metrics = dict(active_metrics_cache[t.stunnel_id])
