@@ -83,10 +83,10 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
-        // Assign colors based on metrics
-        const getEdgeColor = (metrics) => {
-            if (!metrics || metrics.health === 'unknown') return { color: '#3b82f6', highlight: '#60a5fa' }; // Blue
-            if (metrics.health === 'degraded') return { color: '#ef4444', highlight: '#f87171' }; // Red
+        // Assign colors and widths based on metrics
+        const getEdgeStyle = (metrics) => {
+            if (!metrics || metrics.health === 'unknown') return { color: { color: '#3b82f6', highlight: '#60a5fa' }, width: 1 }; // Blue
+            if (metrics.health === 'degraded') return { color: { color: '#ef4444', highlight: '#f87171' }, width: 2 }; // Red
 
             // If healthy, check throughput
             let bytesPerSec = 0;
@@ -95,9 +95,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (bytesPerSec < 1000) {
-                return { color: '#9ca3af', highlight: '#d1d5db' }; // Gray (idle/low bandwidth)
+                return { color: { color: '#9ca3af', highlight: '#d1d5db', opacity: 0.6 }, width: 1 }; // Gray (idle/low bandwidth), thinner
             } else {
-                return { color: '#22c55e', highlight: '#4ade80' }; // Green (active traffic)
+                return { color: { color: '#22c55e', highlight: '#4ade80', opacity: 1.0 }, width: 3 }; // Green (active traffic), thicker
             }
         };
 
@@ -126,18 +126,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (t.metrics.health) tooltip += `\nHealth: ${t.metrics.health.toUpperCase()}`;
             }
 
+            const edgeStyle = getEdgeStyle(t.metrics);
+
             // Edge
             edgesData.push({
-                id: t.stunnel_id,
+                id: t.stunnel_id, 
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
                 title: tooltip,
                 stunnel_id: t.stunnel_id,
                 arrows: 'to',
-                color: getEdgeColor(t.metrics),
+                color: edgeStyle.color,
+                width: edgeStyle.width,
                 font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' },
-                metrics_health: t.metrics ? t.metrics.health : "unknown"
+                metrics_health: t.metrics ? t.metrics.health : "unknown",
+                smooth: { type: 'continuous' } // Ensure smooth curves
             });
         });
 
