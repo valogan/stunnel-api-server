@@ -268,7 +268,7 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
         if t.stunnel_id in active_metrics_cache:
             metrics = dict(active_metrics_cache[t.stunnel_id])
             last_bytes_time = metrics.get("last_updated_bytes", 0)
-            if current_time - last_bytes_time > 10:
+            if current_time - last_bytes_time > 3:
                 metrics["bytes_msg"] = "0 B/s"
         t_dict["metrics"] = metrics
         tunnels_data.append(t_dict)
