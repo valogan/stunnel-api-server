@@ -13,7 +13,9 @@ from pycrescolib.clientlib import clientlib
 from stunnel_direct import StunnelDirect
 from fastapi import Depends
 from sqlalchemy.orm import Session
-from database import Base, engine, get_db, TunnelRecord
+from database import Base, engine, get_db, TunnelRecord, SessionLocal
+import threading
+import re
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -26,10 +28,73 @@ proxy_region = None
 proxy_agent = None
 proxy_host = None
 
+# --- Metrics Cache & Logstreamer ---
+active_metrics_cache = {}
+plugin_id_to_stunnel_id = {}
+logstreamer_instance = None
+metrics_worker_running = False
+
+def process_log_message(message: str):
+    plugin_match = re.search(r'system-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', message)
+    stunnel_id = None
+    if plugin_match:
+        plugin_id = f"system-{plugin_match.group(1)}"
+        stunnel_id = plugin_id_to_stunnel_id.get(plugin_id)
+        
+    if not stunnel_id:
+        stunnel_match = re.search(r'tunnel:?\s*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', message, re.IGNORECASE)
+        if stunnel_match:
+            stunnel_id = stunnel_match.group(1)
+            
+    if stunnel_id:
+        if stunnel_id not in active_metrics_cache:
+            active_metrics_cache[stunnel_id] = {"health": "unknown", "bytes_msg": "", "last_updated": 0, "status_code": 10}
+            
+        active_metrics_cache[stunnel_id]["last_updated"] = time.time()
+        
+        if "Health check successful" in message:
+            active_metrics_cache[stunnel_id]["health"] = "healthy"
+            active_metrics_cache[stunnel_id]["status_code"] = 10
+        elif "Health check failed" in message or "timeout" in message.lower():
+            active_metrics_cache[stunnel_id]["health"] = "degraded"
+            active_metrics_cache[stunnel_id]["status_code"] = 50
+        elif "bytes" in message.lower() and "io.cresco.stunnel.performancemonitor" in message:
+            active_metrics_cache[stunnel_id]["bytes_msg"] = message.split("] ")[-1].strip()
+
+def background_metrics_worker():
+    global logstreamer_instance
+    subscribed_agents = set()
+    while metrics_worker_running:
+        try:
+            # Update mappings from DB
+            db = SessionLocal()
+            try:
+                tunnels = db.query(TunnelRecord).all()
+                for t in tunnels:
+                    if t.stunnel_plugin_id and t.stunnel_id:
+                        plugin_id_to_stunnel_id[t.stunnel_plugin_id] = t.stunnel_id
+            finally:
+                db.close()
+                
+            # Subscribe to newly discovered agents
+            if cresco_client and cresco_client.connected() and logstreamer_instance:
+                agents = cresco_client.globalcontroller.get_agent_list()
+                if agents:
+                    for agent in agents:
+                        r = agent.get('region') or agent.get('region_id')
+                        a = agent.get('agent') or agent.get('agent_id')
+                        if r and a and (r, a) not in subscribed_agents:
+                            logger.info(f"Subscribing logstreamer to {r}/{a}")
+                            logstreamer_instance.update_config(r, a)
+                            subscribed_agents.add((r, a))
+        except Exception as e:
+            logger.error(f"Error in background metrics worker: {e}")
+        time.sleep(10)
+
 # --- Lifespan & Initialization ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cresco_client, stunnel_manager
+    global cresco_client, stunnel_manager, logstreamer_instance, metrics_worker_running
     
     # 1. Read config
     config = configparser.ConfigParser()
@@ -77,6 +142,16 @@ async def lifespan(app: FastAPI):
         logger.info("Successfully connected to Cresco Server.")
         # 3. Initialize StunnelManager
         stunnel_manager = StunnelDirect(cresco_client, logger=logger)
+        
+        try:
+            logstreamer_instance = cresco_client.get_logstreamer(callback=process_log_message)
+            logstreamer_instance.connect()
+            metrics_worker_running = True
+            threading.Thread(target=background_metrics_worker, daemon=True).start()
+            logger.info("Started background logstreamer for tunnel metrics.")
+        except Exception as e:
+            logger.error(f"Failed to start logstreamer: {e}")
+            
     else:
         logger.error("Failed to connect to Cresco server!")
         # We don't strictly crash the app so you can see errors, but you could raise an exception here.
@@ -92,6 +167,9 @@ async def lifespan(app: FastAPI):
     
     # 4. Cleanup on shutdown
     logger.info("Shutting down API server, closing Cresco connection...")
+    metrics_worker_running = False
+    if logstreamer_instance:
+        logstreamer_instance.close()
     if cresco_client:
         cresco_client.close()
 
@@ -340,6 +418,12 @@ def get_tunnels(
         
     tunnels = query.all()
     
+    tunnels_data = []
+    for t in tunnels:
+        t_dict = {c.name: getattr(t, c.name) for c in t.__table__.columns}
+        t_dict["metrics"] = active_metrics_cache.get(t.stunnel_id, None)
+        tunnels_data.append(t_dict)
+    
     # If the user also explicitly provided the plugin ID, try to get live Cresco status for them too
     cresco_tunnels = []
     if stunnel_manager and src_region and src_agent and src_plugin_id:
@@ -355,7 +439,7 @@ def get_tunnels(
             logger.error(f"Failed to fetch live tunnels: {e}")
 
     return {
-        "database_tunnels": tunnels,
+        "database_tunnels": tunnels_data,
         "live_cresco_tunnels": cresco_tunnels
     }
 

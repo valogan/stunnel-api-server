@@ -36,6 +36,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Vis.js Network instance
     let network = null;
+    let nodesDataset = new vis.DataSet();
+    let edgesDataset = new vis.DataSet();
+    let initialized = false;
     let edgeCreationCallback = null;
     const edgeModal = document.getElementById('edgeModal');
     const saveEdgeBtn = document.getElementById('saveEdgeBtn');
@@ -80,15 +83,20 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
+        // Assign colors based on metrics
+        const getEdgeColor = (metrics) => {
+            if (!metrics || metrics.health === 'unknown') return { color: '#3b82f6', highlight: '#60a5fa' };
+            if (metrics.health === 'healthy') return { color: '#22c55e', highlight: '#4ade80' };
+            return { color: '#ef4444', highlight: '#f87171' }; // degraded
+        };
+
         // 2. Add Tunnels as edges (and missing nodes just in case)
         tunnels.forEach(t => {
-            // Source Node (if not already fetched by agents list)
+            // Source Node
             if (!nodesData.has(t.src_agent)) {
                 currentNodesMap.set(t.src_agent, { region: t.src_region, agent: t.src_agent });
                 nodesData.set(t.src_agent, {
-                    id: t.src_agent,
-                    label: t.src_agent,
-                    group: t.src_region
+                    id: t.src_agent, label: t.src_agent, group: t.src_region
                 });
             }
 
@@ -97,120 +105,116 @@ document.addEventListener('DOMContentLoaded', () => {
                 let dRegion = t.dst_region || t.src_region;
                 currentNodesMap.set(t.dst_agent, { region: dRegion, agent: t.dst_agent });
                 nodesData.set(t.dst_agent, {
-                    id: t.dst_agent,
-                    label: t.dst_agent,
-                    group: dRegion
+                    id: t.dst_agent, label: t.dst_agent, group: dRegion
                 });
+            }
+
+            let tooltip = `Tunnel ID: ${t.stunnel_id}\nBuffer: ${t.buffer_size}`;
+            if (t.metrics) {
+                if (t.metrics.bytes_msg) tooltip += `\nThroughput: ${t.metrics.bytes_msg}`;
+                if (t.metrics.health) tooltip += `\nHealth: ${t.metrics.health.toUpperCase()}`;
             }
 
             // Edge
             edgesData.push({
-                id: t.stunnel_id, // Store ID directly as the edge string ID
+                id: t.stunnel_id, 
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
-                title: `Tunnel ID: ${t.stunnel_id}\nBuffer: ${t.buffer_size}`,
-                stunnel_id: t.stunnel_id, // Store as property
+                title: tooltip,
+                stunnel_id: t.stunnel_id,
                 arrows: 'to',
-                color: { color: '#3b82f6', highlight: '#60a5fa' },
-                font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' }
+                color: getEdgeColor(t.metrics),
+                font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' },
+                metrics_health: t.metrics ? t.metrics.health : "unknown"
             });
         });
 
-        const nodes = Array.from(nodesData.values()).map(node => {
-            return {
-                ...node,
-                shape: 'dot',
-                size: 20,
-                font: { color: '#f8fafc', size: 14 },
-                color: {
-                    border: '#2563eb',
-                    background: '#1e293b',
-                    highlight: {
-                        border: '#60a5fa',
-                        background: '#334155'
+        const nodes = Array.from(nodesData.values()).map(node => ({
+            ...node, shape: 'dot', size: 20, font: { color: '#f8fafc', size: 14 },
+            color: { border: '#2563eb', background: '#1e293b', highlight: { border: '#60a5fa', background: '#334155' } }
+        }));
+
+        nodesDataset.update(nodes);
+        edgesDataset.update(edgesData);
+
+        // Remove old nodes/edges
+        const currentNodesIds = new Set(nodes.map(n => n.id));
+        const currentEdgesIds = new Set(edgesData.map(e => e.id));
+        
+        nodesDataset.forEach(n => { if (!currentNodesIds.has(n.id)) nodesDataset.remove(n.id); });
+        edgesDataset.forEach(e => { if (!currentEdgesIds.has(e.id)) edgesDataset.remove(e.id); });
+
+        if (!initialized) {
+            const container = document.getElementById('mynetwork');
+            const data = { nodes: nodesDataset, edges: edgesDataset };
+
+            const options = {
+                physics: {
+                    solver: 'forceAtlas2Based',
+                    forceAtlas2Based: {
+                        gravitationalConstant: -50,
+                        centralGravity: 0.01,
+                        springLength: 200,
+                        springConstant: 0.08
+                    },
+                    maxVelocity: 50,
+                    timestep: 0.35,
+                    stabilization: { iterations: 150 }
+                },
+                interaction: {
+                    hover: true,
+                    tooltipDelay: 200
+                },
+                manipulation: {
+                    enabled: false,
+                    addEdge: function (edgeData, callback) {
+                        if (edgeData.from === edgeData.to) {
+                            alert("Cannot connect an agent to itself.");
+                            callback(null);
+                            return;
+                        }
+                        
+                        // Show Modal
+                        document.getElementById('edgeSrcPort').value = '';
+                        document.getElementById('edgeDstPort').value = '';
+                        
+                        edgeModal.classList.remove('hidden');
+                        edgeCreationCallback = {
+                            edgeData: edgeData,
+                            callback: callback
+                        };
                     }
                 }
             };
-        });
 
-        const container = document.getElementById('mynetwork');
+            network = new vis.Network(container, data, options);
 
-        const edgesDataset = new vis.DataSet(edgesData);
-        const data = {
-            nodes: new vis.DataSet(nodes),
-            edges: edgesDataset
-        };
+            // Auto-enter Add Edge mode when clicking a node
+            network.on("selectNode", function(params) {
+                network.addEdgeMode();
+            });
+            
+            network.on("deselectNode", function(params) {
+                network.disableEditMode();
+            });
 
-        const options = {
-            physics: {
-                solver: 'forceAtlas2Based',
-                forceAtlas2Based: {
-                    gravitationalConstant: -50,
-                    centralGravity: 0.01,
-                    springLength: 200,
-                    springConstant: 0.08
-                },
-                maxVelocity: 50,
-                timestep: 0.35,
-                stabilization: { iterations: 150 }
-            },
-            interaction: {
-                hover: true,
-                tooltipDelay: 200
-            },
-            manipulation: {
-                enabled: false,
-                addEdge: function (edgeData, callback) {
-                    if (edgeData.from === edgeData.to) {
-                        alert("Cannot connect an agent to itself.");
-                        callback(null);
-                        return;
+            // Handle edge clicks for deletion
+            network.on("selectEdge", async function(params) {
+                // Only trigger if an edge is clicked without a node being selected
+                if (params.nodes.length === 0 && params.edges.length === 1) {
+                    const edgeId = params.edges[0];
+                    const edge = edgesDataset.get(edgeId);
+                    
+                    if (edge && edge.stunnel_id) {
+                        if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
+                            await deleteTunnelFromGraph(edge.stunnel_id);
+                        }
                     }
-                    
-                    // Show Modal
-                    document.getElementById('edgeSrcPort').value = '';
-                    document.getElementById('edgeDstPort').value = '';
-                    
-                    edgeModal.classList.remove('hidden');
-                    edgeCreationCallback = {
-                        edgeData: edgeData,
-                        callback: callback
-                    };
                 }
-            }
-        };
-
-        if (network !== null) {
-            network.destroy();
-            network = null;
+            });
+            initialized = true;
         }
-
-        network = new vis.Network(container, data, options);
-
-        // Auto-enter Add Edge mode when clicking a node
-        network.on("selectNode", function(params) {
-            network.addEdgeMode();
-        });
-        
-        network.on("deselectNode", function(params) {
-            network.disableEditMode();
-        });
-
-        // Handle edge clicks for deletion
-        network.on("selectEdge", async function(params) {
-            // Only trigger if an edge is clicked without a node being selected
-            if (params.nodes.length === 0 && params.edges.length === 1) {
-                const edgeId = params.edges[0];
-                const edge = edgesDataset.get(edgeId);
-                
-                if (edge && edge.stunnel_id) {
-                    if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
-                        await deleteTunnelFromGraph(edge.stunnel_id);
-                    }
-                }
-            }
-        });
     }
 
     async function deleteTunnelFromGraph(tunnelId) {
@@ -315,4 +319,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial fetch
     fetchDataAndDraw();
+    
+    // Auto-poll metrics every 5 seconds
+    setInterval(fetchDataAndDraw, 5000);
 });
