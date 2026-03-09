@@ -2,12 +2,13 @@ import logging
 import configparser
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi import Request
 from fastapi.responses import Response
 import time
 import uuid
+import asyncio
 
 from pycrescolib.clientlib import clientlib
 from stunnel_direct import StunnelDirect
@@ -157,7 +158,8 @@ async def lifespan(app: FastAPI):
             logstreamer_instance.connect()
             metrics_worker_running = True
             threading.Thread(target=background_metrics_worker, daemon=True).start()
-            logger.info("Started background logstreamer for tunnel metrics.")
+            asyncio.create_task(websocket_metrics_task())
+            logger.info("Started background logstreamer and WS task for tunnel metrics.")
         except Exception as e:
             logger.error(f"Failed to start logstreamer: {e}")
             
@@ -213,6 +215,85 @@ async def log_requests(request: Request, call_next):
     except Exception as e:
         logger.error(f"Request failed: {e}", exc_info=True)
         raise
+
+# --- WebSocket Connection Manager ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                logger.error(f"Failed to send WS message: {e}")
+                if connection in self.active_connections:
+                    self.active_connections.remove(connection)
+
+manager = ConnectionManager()
+
+def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plugin_id=None, dst_region=None, dst_agent=None, src_port=None, dst_host=None, dst_port=None):
+    """Helper to build the tunnels response block for both REST and WS"""
+    query = db.query(TunnelRecord)
+    if src_region: query = query.filter(TunnelRecord.src_region == src_region)
+    if src_agent: query = query.filter(TunnelRecord.src_agent == src_agent)
+    if dst_region: query = query.filter(TunnelRecord.dst_region == dst_region)
+    if dst_agent: query = query.filter(TunnelRecord.dst_agent == dst_agent)
+    if src_port: query = query.filter(TunnelRecord.src_port == src_port)
+    if dst_host: query = query.filter(TunnelRecord.dst_host == dst_host)
+    if dst_port: query = query.filter(TunnelRecord.dst_port == dst_port)
+        
+    tunnels = query.all()
+    tunnels_data = []
+    current_time = time.time()
+    
+    for t in tunnels:
+        t_dict = {c.name: getattr(t, c.name) for c in t.__table__.columns}
+        metrics = None
+        if t.stunnel_id in active_metrics_cache:
+            metrics = dict(active_metrics_cache[t.stunnel_id])
+            last_bytes_time = metrics.get("last_updated_bytes", 0)
+            if current_time - last_bytes_time > 10:
+                metrics["bytes_msg"] = "0 B/s"
+        t_dict["metrics"] = metrics
+        tunnels_data.append(t_dict)
+    
+    cresco_tunnels = []
+    if stunnel_manager and src_region and src_agent and src_plugin_id:
+        try:
+            live_tunnels = stunnel_manager.get_tunnel_list(
+                src_region=src_region, src_agent=src_agent, src_plugin_id=src_plugin_id
+            )
+            if live_tunnels: cresco_tunnels = live_tunnels
+        except Exception:
+            pass
+
+    return {
+        "database_tunnels": tunnels_data,
+        "live_cresco_tunnels": cresco_tunnels
+    }
+
+async def websocket_metrics_task():
+    """Background task to broadcast metrics continuously"""
+    while metrics_worker_running:
+        try:
+            if manager.active_connections:
+                db = SessionLocal()
+                try:
+                    data = build_tunnels_response(db)
+                    await manager.broadcast(data)
+                finally:
+                    db.close()
+        except Exception as e:
+            logger.error(f"WebSocket broadcast error: {e}")
+        await asyncio.sleep(2)  # Update UI every 2 seconds
 
 # --- Define Pydantic Models for Input ---
 class TunnelCreateRequest(BaseModel):
@@ -391,6 +472,20 @@ async def tunnels_preflight(request: Request):
 
 from typing import Optional
 
+@app.websocket("/ws/tunnels")
+async def websocket_tunnels(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Client doesn't need to send us anything, but we keep the connection alive
+            # by awaiting messages. If client drops, receive_text() raises an exception.
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
+
 @app.get("/tunnels")
 def get_tunnels(
     src_region: Optional[str] = Query(None, description="The source region to filter by"),
@@ -407,61 +502,10 @@ def get_tunnels(
     Retrieve a list of database tunnels.
     Provide optional query parameters to filter the results.
     """
-    # Build a database query from the optional arguments
-    query = db.query(TunnelRecord)
-    
-    if src_region:
-        query = query.filter(TunnelRecord.src_region == src_region)
-    if src_agent:
-        query = query.filter(TunnelRecord.src_agent == src_agent)
-    if dst_region:
-        query = query.filter(TunnelRecord.dst_region == dst_region)
-    if dst_agent:
-        query = query.filter(TunnelRecord.dst_agent == dst_agent)
-    if src_port:
-        query = query.filter(TunnelRecord.src_port == src_port)
-    if dst_host:
-        query = query.filter(TunnelRecord.dst_host == dst_host)
-    if dst_port:
-        query = query.filter(TunnelRecord.dst_port == dst_port)
-        
-    tunnels = query.all()
-    
-    tunnels_data = []
-    current_time = time.time()
-    for t in tunnels:
-        t_dict = {c.name: getattr(t, c.name) for c in t.__table__.columns}
-        
-        metrics = None
-        if t.stunnel_id in active_metrics_cache:
-            metrics = dict(active_metrics_cache[t.stunnel_id]) # Shallow copy
-            
-            # If no byte logs received in 10+ seconds, reset bandwidth to zero
-            last_bytes_time = metrics.get("last_updated_bytes", 0)
-            if current_time - last_bytes_time > 10:
-                metrics["bytes_msg"] = "0 B/s"
-                
-        t_dict["metrics"] = metrics
-        tunnels_data.append(t_dict)
-    
-    # If the user also explicitly provided the plugin ID, try to get live Cresco status for them too
-    cresco_tunnels = []
-    if stunnel_manager and src_region and src_agent and src_plugin_id:
-        try:
-            live_tunnels = stunnel_manager.get_tunnel_list(
-                src_region=src_region,
-                src_agent=src_agent,
-                src_plugin_id=src_plugin_id
-            )
-            if live_tunnels:
-                cresco_tunnels = live_tunnels
-        except Exception as e:
-            logger.error(f"Failed to fetch live tunnels: {e}")
-
-    return {
-        "database_tunnels": tunnels_data,
-        "live_cresco_tunnels": cresco_tunnels
-    }
+    return build_tunnels_response(
+        db, src_region, src_agent, src_plugin_id, dst_region, dst_agent,
+        src_port, dst_host, dst_port
+    )
 
 @app.get("/tunnels/{stunnel_id}/status")
 def get_tunnel_status(

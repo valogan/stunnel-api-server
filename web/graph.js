@@ -327,14 +327,75 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Keep track of the latest agents so the WebSocket can just update tunnels
+    let currentAgents = [];
+
+    async function fetchAgents() {
+        try {
+            const agentsRes = await fetch(`${API_URL}/agents`);
+            if (agentsRes.ok) {
+                const agentsData = await agentsRes.json();
+                currentAgents = agentsData.agents || [];
+            }
+        } catch (error) {
+            console.error('Error fetching agents:', error);
+        }
+    }
+
+    // Set up WebSocket for realtime tunnel metrics
+    let ws = null;
+    function connectWebSocket() {
+        if (ws) {
+            ws.close();
+        }
+        
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrlStr = API_URL.replace(/^https?:\/\//, '');
+        const wsUrl = `${wsProtocol}//${wsUrlStr}/ws/tunnels`;
+
+        console.log("Connecting to WebSocket:", wsUrl);
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log("WebSocket connected!");
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                const tunnels = data.database_tunnels || [];
+                // Redraw graph dynamically with the latest realtime metrics
+                if (currentAgents.length > 0) {
+                    drawGraph(currentAgents, tunnels);
+                }
+            } catch (err) {
+                console.error("Error parsing WS message", err);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket disconnected. Retrying in 5 seconds...");
+            setTimeout(connectWebSocket, 5000);
+        };
+
+        ws.onerror = (err) => {
+            console.error("WebSocket error:", err);
+            ws.close();
+        };
+    }
+
     // Replace original refresh button action
-    refreshBtn.addEventListener('click', () => {
-        fetchDataAndDraw();
+    refreshBtn.addEventListener('click', async () => {
+        await fetchAgents();
+        // The WS will automatically paint the next tick, but to be instant we could force a pull
+        console.log("Force refreshed Agents list.");
     });
 
-    // Initial fetch
-    fetchDataAndDraw();
-
-    // Auto-poll metrics every 5 seconds
-    setInterval(fetchDataAndDraw, 5000);
+    // Initial Bootstrap
+    async function init() {
+        await fetchAgents();
+        connectWebSocket();
+    }
+    
+    init();
 });
