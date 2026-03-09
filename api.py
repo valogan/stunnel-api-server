@@ -35,6 +35,7 @@ logstreamer_instance = None
 metrics_worker_running = False
 
 def process_log_message(message: str):
+    logger.info(f"Processing log message: {message}")
     plugin_match = re.search(r'system-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', message)
     stunnel_id = None
     if plugin_match:
