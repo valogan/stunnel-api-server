@@ -65,7 +65,6 @@ def process_log_message(message: str):
                 active_metrics_cache[stunnel_id]["bytes_msg"] = "0 B/s"
             else:
                 # Try to extract actual bytes transfer count
-                import re
                 bytes_match = re.search(r'(\d+)\s*bytes', msg_body, re.IGNORECASE)
                 if bytes_match:
                     active_metrics_cache[stunnel_id]["bytes_msg"] = f"{int(bytes_match.group(1))} B/s"

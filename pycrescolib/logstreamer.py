@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, Callable, Union
 import websockets
 import backoff
 from contextlib import asynccontextmanager
+import re
 
 # Setup logging
 logger = logging.getLogger(__name__)
