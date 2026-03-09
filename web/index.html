@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,14 +8,15 @@
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 </head>
+
 <body>
     <div class="container">
         <header>
             <h1>Cresco Tunnel Manager</h1>
             <p>Manage and monitor your stunnel pipelines</p>
             <nav class="header-nav">
-                <a href="#" id="nav-home" class="nav-link active">Home</a>
-                <a href="#" id="nav-agents" class="nav-link">Agents</a>
+                <a href="index.html" class="nav-link active">Home</a>
+                <a href="agents.html" class="nav-link">Agents</a>
                 <a href="graph.html" class="nav-link">Graph View</a>
             </nav>
         </header>
@@ -81,7 +83,7 @@
                             <thead>
                                 <tr>
                                     <th>ID</th>
-                                    <th>Plugin ID</th> 
+                                    <th>Plugin ID</th>
                                     <th>Source</th>
                                     <th>Destination</th>
                                     <th>Buffer Size</th>
@@ -92,34 +94,6 @@
                             <tbody id="tunnelsBody">
                                 <tr>
                                     <td colspan="7" class="text-center text-muted">Loading tunnels...</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </section>
-            </div>
-
-            <!-- AGENTS VIEW -->
-            <div id="view-agents" class="hidden">
-                <section class="card agent-list">
-                    <div class="section-header">
-                        <h2>Connected Agents</h2>
-                        <button id="refreshAgentsBtn" class="btn btn-secondary">Refresh Agents</button>
-                    </div>
-                    <div class="table-container">
-                        <table id="agentsTable">
-                            <thead>
-                                <tr>
-                                    <th>Region ID</th>
-                                    <th>Agent ID</th>
-                                    <th>Status</th>
-                                    <th>Environment</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="agentsBody">
-                                <tr>
-                                    <td colspan="5" class="text-center text-muted">Loading agents...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -146,7 +120,8 @@
         <div class="modal-content info-modal-content">
             <h2 id="infoModalTitle">Info</h2>
             <div class="form-group">
-                <pre id="infoModalBody" style="background:#1e1e2d; padding:15px; border-radius:8px; overflow-x:auto; color:#a5b4fc; font-size:14px; max-height:400px; overflow-y:auto;"></pre>
+                <pre id="infoModalBody"
+                    style="background:#1e1e2d; padding:15px; border-radius:8px; overflow-x:auto; color:#a5b4fc; font-size:14px; max-height:400px; overflow-y:auto;"></pre>
             </div>
             <button id="closeInfoModalBtn" class="btn btn-secondary" style="margin-top:10px;">Close</button>
         </div>
@@ -154,4 +129,5 @@
 
     <script src="app.js"></script>
 </body>
+
 </html>

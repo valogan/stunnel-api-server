@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cresco Agent Manager</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cresco Agent Manager</h1>
+            <p>Manage and monitor your stunnel agents</p>
+            <nav class="header-nav">
+                <a href="index.html" class="nav-link">Home</a>
+                <a href="agents.html" class="nav-link active">Agents</a>
+                <a href="graph.html" class="nav-link">Graph View</a>
+            </nav>
+        </header>
+
+        <main>
+            <section class="card agent-list">
+                <div class="section-header">
+                    <h2>Connected Agents</h2>
+                    <button id="refreshAgentsBtn" class="btn btn-secondary">Refresh Agents</button>
+                </div>
+                <div class="table-container">
+                    <table id="agentsTable">
+                        <thead>
+                            <tr>
+                                <th>Region ID</th>
+                                <th>Agent ID</th>
+                                <th>Status</th>
+                                <th>Environment</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="agentsBody">
+                            <tr>
+                                <td colspan="5" class="text-center text-muted">Loading agents...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="configModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>API Configuration</h2>
+            <p>Verify or update the API endpoint URL</p>
+            <div class="form-group">
+                <label for="apiUrl">API URL</label>
+                <input type="url" id="apiUrl" value="http://localhost:8005">
+            </div>
+            <button id="saveConfigBtn" class="btn btn-primary">Save & Reload</button>
+        </div>
+    </div>
+    <div id="configToggle" class="config-toggle" title="Settings">⚙️</div>
+
+    <script src="agents.js"></script>
+</body>
+</html>
