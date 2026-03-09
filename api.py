@@ -59,7 +59,17 @@ def process_log_message(message: str):
             active_metrics_cache[stunnel_id]["health"] = "degraded"
             active_metrics_cache[stunnel_id]["status_code"] = 50
         elif "bytes" in message.lower() and "io.cresco.stunnel.performancemonitor" in message:
-            active_metrics_cache[stunnel_id]["bytes_msg"] = message.split("] ")[-1].strip()
+            msg_body = message.split("] ")[-1].strip()
+            if "no bytes" in msg_body.lower():
+                active_metrics_cache[stunnel_id]["bytes_msg"] = "0 B/s"
+            else:
+                # Try to extract actual bytes transfer count
+                import re
+                bytes_match = re.search(r'(\d+)\s*bytes', msg_body, re.IGNORECASE)
+                if bytes_match:
+                    active_metrics_cache[stunnel_id]["bytes_msg"] = f"{int(bytes_match.group(1))} B/s"
+                else:
+                    active_metrics_cache[stunnel_id]["bytes_msg"] = msg_body
 
 def background_metrics_worker():
     global logstreamer_instance
