@@ -36,6 +36,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Vis.js Network instance
     let network = null;
+    let nodesDataset = new vis.DataSet();
+    let edgesDataset = new vis.DataSet();
+    let initialized = false;
     let edgeCreationCallback = null;
     const edgeModal = document.getElementById('edgeModal');
     const saveEdgeBtn = document.getElementById('saveEdgeBtn');
@@ -80,15 +83,31 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
+        // Assign colors and widths based on metrics
+        const getEdgeStyle = (metrics) => {
+            if (!metrics || metrics.health === 'unknown') return { color: { color: '#3b82f6', highlight: '#60a5fa' }, width: 1 }; // Blue
+            if (metrics.health === 'degraded') return { color: { color: '#ef4444', highlight: '#f87171' }, width: 2 }; // Red
+
+            // If healthy, check throughput
+            let bytesPerSec = 0;
+            if (metrics.bytes_msg && metrics.bytes_msg.includes('B/s')) {
+                bytesPerSec = parseInt(metrics.bytes_msg.replace(/,/g, '').split(' ')[0]) || 0;
+            }
+
+            if (bytesPerSec < 1000) {
+                return { color: { color: '#9ca3af', highlight: '#d1d5db', opacity: 0.6 }, width: 1 }; // Gray (idle/low bandwidth), thinner
+            } else {
+                return { color: { color: '#22c55e', highlight: '#4ade80', opacity: 1.0 }, width: 3 }; // Green (active traffic), thicker
+            }
+        };
+
         // 2. Add Tunnels as edges (and missing nodes just in case)
         tunnels.forEach(t => {
-            // Source Node (if not already fetched by agents list)
+            // Source Node
             if (!nodesData.has(t.src_agent)) {
                 currentNodesMap.set(t.src_agent, { region: t.src_region, agent: t.src_agent });
                 nodesData.set(t.src_agent, {
-                    id: t.src_agent,
-                    label: t.src_agent,
-                    group: t.src_region
+                    id: t.src_agent, label: t.src_agent, group: t.src_region
                 });
             }
 
@@ -97,120 +116,120 @@ document.addEventListener('DOMContentLoaded', () => {
                 let dRegion = t.dst_region || t.src_region;
                 currentNodesMap.set(t.dst_agent, { region: dRegion, agent: t.dst_agent });
                 nodesData.set(t.dst_agent, {
-                    id: t.dst_agent,
-                    label: t.dst_agent,
-                    group: dRegion
+                    id: t.dst_agent, label: t.dst_agent, group: dRegion
                 });
             }
 
+            let tooltip = `Tunnel ID: ${t.stunnel_id}\nBuffer: ${t.buffer_size}`;
+            if (t.metrics) {
+                if (t.metrics.bytes_msg) tooltip += `\nThroughput: ${t.metrics.bytes_msg}`;
+                if (t.metrics.health) tooltip += `\nHealth: ${t.metrics.health.toUpperCase()}`;
+            }
+
+            const edgeStyle = getEdgeStyle(t.metrics);
+
             // Edge
             edgesData.push({
-                id: t.stunnel_id, // Store ID directly as the edge string ID
+                id: t.stunnel_id, 
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
-                title: `Tunnel ID: ${t.stunnel_id}\nBuffer: ${t.buffer_size}`,
-                stunnel_id: t.stunnel_id, // Store as property
+                title: tooltip,
+                stunnel_id: t.stunnel_id,
                 arrows: 'to',
-                color: { color: '#3b82f6', highlight: '#60a5fa' },
-                font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' }
+                color: edgeStyle.color,
+                width: edgeStyle.width,
+                font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' },
+                metrics_health: t.metrics ? t.metrics.health : "unknown",
+                smooth: { type: 'continuous' } // Ensure smooth curves
             });
         });
 
-        const nodes = Array.from(nodesData.values()).map(node => {
-            return {
-                ...node,
-                shape: 'dot',
-                size: 20,
-                font: { color: '#f8fafc', size: 14 },
-                color: {
-                    border: '#2563eb',
-                    background: '#1e293b',
-                    highlight: {
-                        border: '#60a5fa',
-                        background: '#334155'
+        const nodes = Array.from(nodesData.values()).map(node => ({
+            ...node, shape: 'dot', size: 20, font: { color: '#f8fafc', size: 14 },
+            color: { border: '#2563eb', background: '#1e293b', highlight: { border: '#60a5fa', background: '#334155' } }
+        }));
+
+        nodesDataset.update(nodes);
+        edgesDataset.update(edgesData);
+
+        // Remove old nodes/edges
+        const currentNodesIds = new Set(nodes.map(n => n.id));
+        const currentEdgesIds = new Set(edgesData.map(e => e.id));
+
+        nodesDataset.forEach(n => { if (!currentNodesIds.has(n.id)) nodesDataset.remove(n.id); });
+        edgesDataset.forEach(e => { if (!currentEdgesIds.has(e.id)) edgesDataset.remove(e.id); });
+
+        if (!initialized) {
+            const container = document.getElementById('mynetwork');
+            const data = { nodes: nodesDataset, edges: edgesDataset };
+
+            const options = {
+                physics: {
+                    solver: 'forceAtlas2Based',
+                    forceAtlas2Based: {
+                        gravitationalConstant: -50,
+                        centralGravity: 0.01,
+                        springLength: 200,
+                        springConstant: 0.08
+                    },
+                    maxVelocity: 50,
+                    timestep: 0.35,
+                    stabilization: { iterations: 150 }
+                },
+                interaction: {
+                    hover: true,
+                    tooltipDelay: 200
+                },
+                manipulation: {
+                    enabled: false,
+                    addEdge: function (edgeData, callback) {
+                        if (edgeData.from === edgeData.to) {
+                            alert("Cannot connect an agent to itself.");
+                            callback(null);
+                            return;
+                        }
+
+                        // Show Modal
+                        document.getElementById('edgeSrcPort').value = '';
+                        document.getElementById('edgeDstPort').value = '';
+
+                        edgeModal.classList.remove('hidden');
+                        edgeCreationCallback = {
+                            edgeData: edgeData,
+                            callback: callback
+                        };
                     }
                 }
             };
-        });
 
-        const container = document.getElementById('mynetwork');
+            network = new vis.Network(container, data, options);
 
-        const edgesDataset = new vis.DataSet(edgesData);
-        const data = {
-            nodes: new vis.DataSet(nodes),
-            edges: edgesDataset
-        };
+            // Auto-enter Add Edge mode when clicking a node
+            network.on("selectNode", function (params) {
+                network.addEdgeMode();
+            });
 
-        const options = {
-            physics: {
-                solver: 'forceAtlas2Based',
-                forceAtlas2Based: {
-                    gravitationalConstant: -50,
-                    centralGravity: 0.01,
-                    springLength: 200,
-                    springConstant: 0.08
-                },
-                maxVelocity: 50,
-                timestep: 0.35,
-                stabilization: { iterations: 150 }
-            },
-            interaction: {
-                hover: true,
-                tooltipDelay: 200
-            },
-            manipulation: {
-                enabled: false,
-                addEdge: function (edgeData, callback) {
-                    if (edgeData.from === edgeData.to) {
-                        alert("Cannot connect an agent to itself.");
-                        callback(null);
-                        return;
+            network.on("deselectNode", function (params) {
+                network.disableEditMode();
+            });
+
+            // Handle edge clicks for deletion
+            network.on("selectEdge", async function (params) {
+                // Only trigger if an edge is clicked without a node being selected
+                if (params.nodes.length === 0 && params.edges.length === 1) {
+                    const edgeId = params.edges[0];
+                    const edge = edgesDataset.get(edgeId);
+
+                    if (edge && edge.stunnel_id) {
+                        if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
+                            await deleteTunnelFromGraph(edge.stunnel_id);
+                        }
                     }
-                    
-                    // Show Modal
-                    document.getElementById('edgeSrcPort').value = '';
-                    document.getElementById('edgeDstPort').value = '';
-                    
-                    edgeModal.classList.remove('hidden');
-                    edgeCreationCallback = {
-                        edgeData: edgeData,
-                        callback: callback
-                    };
                 }
-            }
-        };
-
-        if (network !== null) {
-            network.destroy();
-            network = null;
+            });
+            initialized = true;
         }
-
-        network = new vis.Network(container, data, options);
-
-        // Auto-enter Add Edge mode when clicking a node
-        network.on("selectNode", function(params) {
-            network.addEdgeMode();
-        });
-        
-        network.on("deselectNode", function(params) {
-            network.disableEditMode();
-        });
-
-        // Handle edge clicks for deletion
-        network.on("selectEdge", async function(params) {
-            // Only trigger if an edge is clicked without a node being selected
-            if (params.nodes.length === 0 && params.edges.length === 1) {
-                const edgeId = params.edges[0];
-                const edge = edgesDataset.get(edgeId);
-                
-                if (edge && edge.stunnel_id) {
-                    if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
-                        await deleteTunnelFromGraph(edge.stunnel_id);
-                    }
-                }
-            }
-        });
     }
 
     async function deleteTunnelFromGraph(tunnelId) {
@@ -218,12 +237,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
                 method: 'DELETE',
             });
-            
+
             if (!response.ok) {
                 const data = await response.json();
                 throw new Error(data.detail || 'Failed to delete tunnel');
             }
-            
+
             // Refresh graph entirely
             await fetchDataAndDraw();
         } catch (error) {
@@ -255,7 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const edgeData = edgeCreationCallback.edgeData;
-        
+
         const srcNode = currentNodesMap.get(edgeData.from);
         const dstNode = currentNodesMap.get(edgeData.to);
 
@@ -291,7 +310,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             edgeModal.classList.add('hidden');
-            
+
             // Refresh graph entirely
             await fetchDataAndDraw();
 
@@ -308,11 +327,75 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Keep track of the latest agents so the WebSocket can just update tunnels
+    let currentAgents = [];
+
+    async function fetchAgents() {
+        try {
+            const agentsRes = await fetch(`${API_URL}/agents`);
+            if (agentsRes.ok) {
+                const agentsData = await agentsRes.json();
+                currentAgents = agentsData.agents || [];
+            }
+        } catch (error) {
+            console.error('Error fetching agents:', error);
+        }
+    }
+
+    // Set up WebSocket for realtime tunnel metrics
+    let ws = null;
+    function connectWebSocket() {
+        if (ws) {
+            ws.close();
+        }
+        
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrlStr = API_URL.replace(/^https?:\/\//, '');
+        const wsUrl = `${wsProtocol}//${wsUrlStr}/ws/tunnels`;
+
+        console.log("Connecting to WebSocket:", wsUrl);
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log("WebSocket connected!");
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                const tunnels = data.database_tunnels || [];
+                // Redraw graph dynamically with the latest realtime metrics
+                if (currentAgents.length > 0) {
+                    drawGraph(currentAgents, tunnels);
+                }
+            } catch (err) {
+                console.error("Error parsing WS message", err);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket disconnected. Retrying in 5 seconds...");
+            setTimeout(connectWebSocket, 5000);
+        };
+
+        ws.onerror = (err) => {
+            console.error("WebSocket error:", err);
+            ws.close();
+        };
+    }
+
     // Replace original refresh button action
-    refreshBtn.addEventListener('click', () => {
-        fetchDataAndDraw();
+    refreshBtn.addEventListener('click', async () => {
+        await fetchAgents();
+        // The WS will automatically paint the next tick, but to be instant we could force a pull
+        console.log("Force refreshed Agents list.");
     });
 
-    // Initial fetch
-    fetchDataAndDraw();
+    // Initial Bootstrap
+    async function init() {
+        await fetchAgents();
+        connectWebSocket();
+    }
+    
+    init();
 });

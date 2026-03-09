@@ -4,3 +4,4 @@ pydantic
 pycrescolib
 sqlalchemy
 psycopg2-binary
+websockets
