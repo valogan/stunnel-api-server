@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cresco Tunnel Manager</title>
+    <title>Smart QoS Tunnels - Cresco</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 </head>
@@ -15,19 +15,22 @@
             <h1>Cresco Tunnel Manager</h1>
             <p>Manage and monitor your stunnel pipelines</p>
             <nav class="header-nav">
-                <a href="index.html" class="nav-link active">Home</a>
+                <a href="index.html" class="nav-link">Home</a>
                 <a href="load-balanced.html" class="nav-link">Load Balanced</a>
-                <a href="smart-qos.html" class="nav-link">Smart QoS</a>
+                <a href="smart-qos.html" class="nav-link active">Smart QoS</a>
                 <a href="agents.html" class="nav-link">Agents</a>
                 <a href="graph.html" class="nav-link">Graph View</a>
             </nav>
         </header>
 
         <main>
-            <!-- TUNNELS VIEW (Default) -->
             <div id="view-tunnels">
                 <section class="card create-tunnel">
-                    <h2>Create New Tunnel</h2>
+                    <h2>Launch Smart QoS Routing Group</h2>
+                    <p class="text-muted" style="margin-bottom: 20px; font-size: 14px;">
+                        This will deploy an HAProxy instance and continuously monitor destination connectivity. 
+                        It will dynamically rewrite HAProxy weights to route around degraded paths automatically.
+                    </p>
                     <form id="createTunnelForm">
                         <div class="form-grid">
                             <div class="form-group">
@@ -36,11 +39,11 @@
                             </div>
                             <div class="form-group">
                                 <label for="src_agent">Source Agent</label>
-                                <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-agent-1">
+                                <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-global-controller">
                             </div>
                             <div class="form-group">
-                                <label for="src_port">Source Port</label>
-                                <input type="text" id="src_port" required placeholder="e.g., 8080">
+                                <label for="src_port">Source HAProxy Bind Port</label>
+                                <input type="text" id="src_port" required placeholder="e.g., 8048">
                             </div>
                             <div class="form-group">
                                 <label for="dst_region">Destination Region</label>
@@ -48,54 +51,48 @@
                             </div>
                             <div class="form-group">
                                 <label for="dst_agent">Destination Agent</label>
-                                <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent2">
-                            </div>
-                            <div class="form-group">
-                                <label for="dst_host">Destination Host</label>
-                                <input type="text" id="dst_host" required placeholder="e.g., 127.0.0.1">
-                            </div>
-                            <div class="form-group">
-                                <label for="dst_port">Destination Port</label>
-                                <input type="text" id="dst_port" required placeholder="e.g., 80">
+                                <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent-1">
                             </div>
                             <div class="form-group">
                                 <label for="buffer_size">Buffer Size</label>
                                 <input type="text" id="buffer_size" value="1024" required>
                             </div>
-                            <div class="form-group">
-                                <label for="stunnel_plugin_id">Plugin ID</label>
-                                <input type="text" id="stunnel_plugin_id" placeholder="Optional/Auto-detected">
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label>Destinations (Host:Port)</label>
+                                <div id="destinationsContainer">
+                                    <div class="destination-row" style="display:flex; gap:10px; margin-bottom:10px;">
+                                        <input type="text" class="dst-input" required placeholder="e.g., 127.0.0.1:8874" style="flex:1;">
+                                        <button type="button" class="btn btn-secondary remove-dst-btn" style="padding:0 15px;" disabled>X</button>
+                                    </div>
+                                </div>
+                                <button type="button" id="addDstBtn" class="btn btn-secondary btn-sm" style="margin-top:5px;">+ Add Destination</button>
                             </div>
                         </div>
                         <button type="submit" class="btn btn-primary" id="submitBtn">
-                            <span class="btn-text">Create Tunnel</span>
+                            <span class="btn-text">Create Smart QoS Group</span>
                             <div class="loader hidden"></div>
                         </button>
-                        <div id="formMessage" class="message hidden"></div>
+                        <div id="formMessage" class="message hidden" style="margin-top:20px; word-break: break-all;"></div>
                     </form>
                 </section>
-
+                
                 <section class="card tunnel-list">
                     <div class="section-header">
-                        <h2>Active Tunnels</h2>
+                        <h2>Active Smart QoS Groups</h2>
                         <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
                     </div>
                     <div class="table-container">
-                        <table id="tunnelsTable">
+                        <table id="groupsTable">
                             <thead>
                                 <tr>
-                                    <th>ID</th>
-                                    <th>Plugin ID</th>
-                                    <th>Source</th>
-                                    <th>Destination</th>
-                                    <th>Buffer Size</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
+                                    <th>Group ID</th>
+                                    <th>HAProxy Frontend</th>
+                                    <th>Backend Tunnels</th>
                                 </tr>
                             </thead>
-                            <tbody id="tunnelsBody">
+                            <tbody id="groupsBody">
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted">Loading tunnels...</td>
+                                    <td colspan="3" class="text-center text-muted">Loading QoS groups...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -118,18 +115,7 @@
     </div>
     <div id="configToggle" class="config-toggle" title="Settings">⚙️</div>
 
-    <div id="infoModal" class="modal hidden">
-        <div class="modal-content info-modal-content">
-            <h2 id="infoModalTitle">Info</h2>
-            <div class="form-group">
-                <pre id="infoModalBody"
-                    style="background:#1e1e2d; padding:15px; border-radius:8px; overflow-x:auto; color:#a5b4fc; font-size:14px; max-height:400px; overflow-y:auto;"></pre>
-            </div>
-            <button id="closeInfoModalBtn" class="btn btn-secondary" style="margin-top:10px;">Close</button>
-        </div>
-    </div>
-
-    <script src="app.js"></script>
+    <script src="smart-qos.js"></script>
 </body>
 
 </html>

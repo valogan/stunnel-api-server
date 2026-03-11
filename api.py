@@ -35,6 +35,8 @@ active_metrics_cache = {}
 plugin_id_to_stunnel_id = {}
 logstreamer_instance = None
 metrics_worker_running = False
+active_qos_groups = {}
+qos_evaluator_running = False
 
 def process_log_message(message: str):
     # Skip noisy messages that aren't stunnel related
@@ -102,10 +104,71 @@ def background_metrics_worker():
             logger.error(f"Error in background metrics worker: {e}")
         time.sleep(10)
 
+def background_qos_evaluator_worker():
+    while qos_evaluator_running:
+        try:
+            for group_id, group in active_qos_groups.items():
+                weights_changed = False
+                for t in group['tunnels']:
+                    tid = t['tunnel_id']
+                    health = active_metrics_cache.get(tid, {}).get('health', 'unknown')
+                    # Base logic: if degraded, weight 0. Else weight 100.
+                    new_weight = 0 if health == 'degraded' else 100
+                    
+                    if t.get('current_weight', 100) != new_weight:
+                        t['current_weight'] = new_weight
+                        weights_changed = True
+                        
+                if weights_changed:
+                    # Rebuild config
+                    servers_block = []
+                    for t in group['tunnels']:
+                        servers_block.append(f"    server {t['haproxy_server_name']} 127.0.0.1:{t['tunnel_port']} check weight {t['current_weight']}")
+                    
+                    servers_str = "\n".join(servers_block)
+                    haproxy_config = f"""
+global
+    log 127.0.0.1 local0
+    maxconn 4096
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    retries 3
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+frontend my_proxy
+    bind *:{group['src_port']}
+    default_backend tunnel_backend
+
+backend tunnel_backend
+    balance roundrobin
+{servers_str}
+"""
+                    logger.info(f"QoS Evaluator updating weights for HAProxy group {group_id}")
+                    if cresco_client and cresco_client.connected():
+                        plugin_id = group['plugin_id']
+                        cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
+                            'action': 'build_config',
+                            'haproxy_config_data': haproxy_config
+                        }, group['src_region'], group['src_agent'], plugin_id)
+                        
+                        cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
+                            'action': 'reload_haproxy'
+                        }, group['src_region'], group['src_agent'], plugin_id)
+                        
+        except Exception as e:
+            logger.error(f"Error in background QoS worker: {e}")
+        time.sleep(10)
+
 # --- Lifespan & Initialization ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cresco_client, stunnel_manager, logstreamer_instance, metrics_worker_running
+    global cresco_client, stunnel_manager, logstreamer_instance, metrics_worker_running, qos_evaluator_running
     
     # 1. Read config
     config = configparser.ConfigParser()
@@ -158,7 +221,9 @@ async def lifespan(app: FastAPI):
             logstreamer_instance = cresco_client.get_logstreamer(callback=process_log_message)
             logstreamer_instance.connect()
             metrics_worker_running = True
+            qos_evaluator_running = True
             threading.Thread(target=background_metrics_worker, daemon=True).start()
+            threading.Thread(target=background_qos_evaluator_worker, daemon=True).start()
             asyncio.create_task(websocket_metrics_task())
             logger.info("Started background logstreamer and WS task for tunnel metrics.")
         except Exception as e:
@@ -180,6 +245,7 @@ async def lifespan(app: FastAPI):
     # 4. Cleanup on shutdown
     logger.info("Shutting down API server, closing Cresco connection...")
     metrics_worker_running = False
+    qos_evaluator_running = False
     if logstreamer_instance:
         logstreamer_instance.close()
     if cresco_client:
@@ -316,6 +382,15 @@ class TunnelCreateRequest(BaseModel):
     buffer_size: str = "1024"
 
 class LoadBalancedTunnelRequest(BaseModel):
+    src_region: str
+    src_agent: str
+    src_port: str
+    dst_region: str
+    dst_agent: str
+    destinations: list[str]
+    buffer_size: str = "1024"
+
+class SmartQoSTunnelRequest(BaseModel):
     src_region: str
     src_agent: str
     src_port: str
@@ -587,10 +662,154 @@ backend tunnel_backend
         }
     }
 
+@app.post("/tunnels-smart-qos")
+def create_tunnel_smart_qos(req: SmartQoSTunnelRequest, db: Session = Depends(get_db)):
+    """
+    Launch tunnels configured with HAProxy for Smart QoS dynamic routing.
+    """
+    if not stunnel_manager or not cresco_client:
+         raise HTTPException(status_code=500, detail="Stunnel manager or Cresco client not initialized.")
+         
+    if not req.destinations:
+         raise HTTPException(status_code=400, detail="At least one destination must be provided.")
+         
+    import random
+    import uuid
+    
+    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    
+    tunnel_ids = []
+    haproxy_servers = []
+    qos_tunnels = []
+    
+    for i, dest in enumerate(req.destinations):
+        if ":" not in dest:
+            raise HTTPException(status_code=400, detail=f"Invalid destination format: '{dest}'. Expected 'host:port'.")
+            
+        dst_host, dst_port = dest.split(":", 1)
+        tunnel_port = str(random.randint(10000, 60000))
+        tunnel_id = str(uuid.uuid1())
+        server_name = f"t{i+1}"
+        
+        response = stunnel_manager.create_tunnel(
+            stunnel_id=tunnel_id,
+            src_region=req.src_region,
+            src_agent=req.src_agent,
+            src_port=tunnel_port,
+            dst_region=req.dst_region,
+            dst_agent=req.dst_agent,
+            dst_host=dst_host,
+            dst_port=dst_port,
+            buffer_size=req.buffer_size
+        )
+
+        if response is None:
+            raise HTTPException(status_code=400, detail=f"Failed to create tunnel for {dest}.")
+
+        # Save to local db
+        db_tunnel = TunnelRecord(
+            stunnel_id=tunnel_id,
+            src_region=req.src_region,
+            src_agent=req.src_agent,
+            src_port=tunnel_port,
+            dst_region=req.dst_region,
+            dst_agent=req.dst_agent,
+            dst_host=dst_host,
+            dst_port=dst_port,
+            buffer_size=req.buffer_size,
+            stunnel_plugin_id=src_plugin_id
+        )
+        db.add(db_tunnel)
+        
+        tunnel_ids.append(tunnel_id)
+        haproxy_servers.append(f"    server {server_name} 127.0.0.1:{tunnel_port} check weight 100")
+        qos_tunnels.append({
+            'tunnel_id': tunnel_id,
+            'haproxy_server_name': server_name,
+            'tunnel_port': tunnel_port,
+            'current_weight': 100
+        })
+        
+    db.commit()
+    
+    # Now deploy and configure HAProxy
+    deployer = HAProxyDeployer(cresco_client, logger)
+    jar_url = "https://github.com/valogan/cresco-haproxy-plugin/releases/download/third/haproxy-1.2-SNAPSHOT.jar"
+    
+    pipeline_id = deployer.deploy_haproxy_plugin(req.src_region, req.src_agent, jar_url)
+    
+    if not pipeline_id:
+        raise HTTPException(status_code=500, detail="Failed to deploy HAProxy plugin.")
+        
+    pipeline_config = cresco_client.globalcontroller.get_pipeline_info(pipeline_id)
+    plugin_id = pipeline_config['nodes'][0]['node_id']
+    
+    servers_block = "\n".join(haproxy_servers)
+    
+    haproxy_config = f"""
+global
+    log 127.0.0.1 local0
+    maxconn 4096
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    retries 3
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+frontend my_proxy
+    bind *:{req.src_port}
+    default_backend tunnel_backend
+
+backend tunnel_backend
+    balance roundrobin
+{servers_block}
+"""
+
+    cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
+        'action': 'build_config',
+        'haproxy_config_data': haproxy_config
+    }, req.src_region, req.src_agent, plugin_id)
+    
+    cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
+        'action': 'start_haproxy'
+    }, req.src_region, req.src_agent, plugin_id)
+    
+    group_id = str(uuid.uuid4())
+    active_qos_groups[group_id] = {
+        'src_region': req.src_region,
+        'src_agent': req.src_agent,
+        'src_port': req.src_port,
+        'plugin_id': plugin_id,
+        'tunnels': qos_tunnels
+    }
+    
+    return {
+        "message": f"Smart QoS tunnels created and HAProxy configured successfully on port {req.src_port}.",
+        "data": {
+            "group_id": group_id,
+            "tunnels": tunnel_ids,
+            "haproxy_pipeline": pipeline_id,
+            "haproxy_plugin": plugin_id
+        }
+    }
+
+@app.get("/tunnels-smart-qos")
+def get_smart_qos_groups():
+    """
+    Retrieve current state of all active Smart QoS groups, including realtime tunnel weights.
+    """
+    return {"groups": active_qos_groups}
+
 
 @app.options("/tunnels")
 @app.options("/tunnels-proxy")
 @app.options("/tunnels-load-balanced")
+@app.options("/tunnels-smart-qos")
 async def tunnels_preflight(request: Request):
     """Handle CORS preflight requests for /tunnels explicitly.
     This ensures OPTIONS requests receive the appropriate CORS headers
