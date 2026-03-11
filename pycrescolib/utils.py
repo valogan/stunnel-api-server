@@ -120,6 +120,9 @@ def get_jar_info(jar_file_path: str) -> Dict[str, str]:
         
         # Validate required fields
         if 'pluginname' not in params:
+            for key, value in params.items():
+                logger.error("HELLOOOOOOOOO")
+                logger.error(key + ": " + value)
             raise ValueError("Plugin name not found in MANIFEST.MF")
         if 'version' not in params:
             raise ValueError("Version not found in MANIFEST.MF")

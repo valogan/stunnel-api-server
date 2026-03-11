@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Load Balanced Tunnel - Cresco</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Cresco Tunnel Manager</h1>
+            <p>Manage and monitor your stunnel pipelines</p>
+            <nav class="header-nav">
+                <a href="index.html" class="nav-link">Home</a>
+                <a href="load-balanced.html" class="nav-link active">Load Balanced</a>
+                <a href="agents.html" class="nav-link">Agents</a>
+                <a href="graph.html" class="nav-link">Graph View</a>
+            </nav>
+        </header>
+
+        <main>
+            <div id="view-tunnels">
+                <section class="card create-tunnel">
+                    <h2>Create Load Balanced Tunnels & HAProxy</h2>
+                    <p class="text-muted" style="margin-bottom: 20px; font-size: 14px;">
+                        This will deploy two tunnels on randomized local ports and configure a local HAProxy instance
+                        to round-robin traffic between them for increased availability.
+                    </p>
+                    <form id="createTunnelForm">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label for="src_region">Source Region</label>
+                                <input type="text" id="src_region" required placeholder="e.g., model-tunnel-region">
+                            </div>
+                            <div class="form-group">
+                                <label for="src_agent">Source Agent</label>
+                                <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-global-controller">
+                            </div>
+                            <div class="form-group">
+                                <label for="src_port">Source HAProxy Bind Port</label>
+                                <input type="text" id="src_port" required placeholder="e.g., 8048">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_region">Destination Region</label>
+                                <input type="text" id="dst_region" required placeholder="e.g., model-tunnel-region">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_agent">Destination Agent</label>
+                                <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent-1">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_host">Destination Host</label>
+                                <input type="text" id="dst_host" required placeholder="e.g., 127.0.0.1">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_port_1">Destination Port 1</label>
+                                <input type="text" id="dst_port_1" required placeholder="e.g., 8874">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_port_2">Destination Port 2</label>
+                                <input type="text" id="dst_port_2" required placeholder="e.g., 8875">
+                            </div>
+                            <div class="form-group">
+                                <label for="buffer_size">Buffer Size</label>
+                                <input type="text" id="buffer_size" value="1024" required>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary" id="submitBtn">
+                            <span class="btn-text">Create Setup</span>
+                            <div class="loader hidden"></div>
+                        </button>
+                        <div id="formMessage" class="message hidden" style="margin-top:20px; word-break: break-all;"></div>
+                    </form>
+                </section>
+                
+                <section class="card tunnel-list">
+                    <div class="section-header">
+                        <h2>All Active Tunnels</h2>
+                        <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+                    </div>
+                    <div class="table-container">
+                        <table id="tunnelsTable">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Plugin ID</th>
+                                    <th>Source</th>
+                                    <th>Destination</th>
+                                    <th>Buffer Size</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tunnelsBody">
+                                <tr>
+                                    <td colspan="7" class="text-center text-muted">Loading tunnels...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <div id="configModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>API Configuration</h2>
+            <p>Verify or update the API endpoint URL</p>
+            <div class="form-group">
+                <label for="apiUrl">API URL</label>
+                <input type="url" id="apiUrl" value="http://localhost:8005">
+            </div>
+            <button id="saveConfigBtn" class="btn btn-primary">Save & Reload</button>
+        </div>
+    </div>
+    <div id="configToggle" class="config-toggle" title="Settings">⚙️</div>
+
+    <div id="infoModal" class="modal hidden">
+        <div class="modal-content info-modal-content">
+            <h2 id="infoModalTitle">Info</h2>
+            <div class="form-group">
+                <pre id="infoModalBody"
+                    style="background:#1e1e2d; padding:15px; border-radius:8px; overflow-x:auto; color:#a5b4fc; font-size:14px; max-height:400px; overflow-y:auto;"></pre>
+            </div>
+            <button id="closeInfoModalBtn" class="btn btn-secondary" style="margin-top:10px;">Close</button>
+        </div>
+    </div>
+
+    <script src="load-balanced.js"></script>
+</body>
+
+</html>
