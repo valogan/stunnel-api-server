@@ -1,6 +1,6 @@
 import configparser
 from pycrescolib.clientlib import clientlib
-from stunnel_direct import StunnelDirect
+from pycrescolib.stunnel import StunnelDirect
 import json
 
 config = configparser.ConfigParser()

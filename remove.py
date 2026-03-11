@@ -1,6 +1,5 @@
 from pycrescolib.clientlib import clientlib
-from stunnel_cadl import StunnelCADL
-from stunnel_direct import StunnelDirect
+from pycrescolib.stunnel import StunnelCADL, StunnelDirect
 import logging
 
 # Setup logging
