@@ -141,15 +141,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Read live status if we fetched it (only available if live_cresco_tunnels matched)
                 let statusBadge = `<span class="status status-running">Active (DB)</span>`;
-                
+
                 // Let's find if there is a live cresco tunnel matching our stunnel_id
                 if (data.live_cresco_tunnels && data.live_cresco_tunnels.length > 0) {
                     const liveTunnel = data.live_cresco_tunnels.find(lt => lt.stunnel_id === t.stunnel_id);
                     if (liveTunnel) {
-                         // The live API returns it running if it's listed.
-                         statusBadge = `<span class="status status-running">Active (Live)</span>`;
+                        // The live API returns it running if it's listed.
+                        statusBadge = `<span class="status status-running">Active (Live)</span>`;
                     } else {
-                         statusBadge = `<span class="status" style="background-color:#4a5568;">Inactive (Live)</span>`;
+                        statusBadge = `<span class="status" style="background-color:#4a5568;">Inactive (Live)</span>`;
                     }
                 }
 
@@ -181,9 +181,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         .then(statusData => {
                             const statusCell = document.getElementById(`status-${t.stunnel_id}`);
                             if (statusCell) {
-                                // Assume it's active if we get a valid config dictionary back, 
-                                // or parse the response if status Data returns a boolean/string
-                                statusCell.innerHTML = `<span class="status status-running">Online</span>`;
+                                if (statusData.status === 'pluginActive') {
+                                    statusCell.innerHTML = `<span class="status status-running">Online</span>`;
+                                } else {
+                                    statusCell.innerHTML = `<span class="status" style="background-color:#4a5568;">Offline</span>`;
+                                }
                             }
                         })
                         .catch(err => {
@@ -228,7 +230,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const region = e.target.getAttribute('data-region');
                     const agent = e.target.getAttribute('data-agent');
                     const plugin = e.target.getAttribute('data-plugin');
-                    
+
                     if (!plugin || plugin === 'null') {
                         alert("Plugin ID is required to fetch status");
                         return;
@@ -238,7 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         const response = await fetch(`${API_URL}/tunnels/${tunnelId}/status?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
                         if (!response.ok) throw new Error('Failed to fetch status');
                         const data = await response.json();
-                        
+
                         infoModalTitle.textContent = `Status: ${tunnelId}`;
                         infoModalBody.textContent = JSON.stringify(data.status, null, 2);
                         infoModal.classList.remove('hidden');
@@ -255,7 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const region = e.target.getAttribute('data-region');
                     const agent = e.target.getAttribute('data-agent');
                     const plugin = e.target.getAttribute('data-plugin');
-                    
+
                     if (!plugin || plugin === 'null') {
                         alert("Plugin ID is required to fetch config");
                         return;
@@ -265,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         const response = await fetch(`${API_URL}/tunnels/${tunnelId}/config?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
                         if (!response.ok) throw new Error('Failed to fetch config');
                         const data = await response.json();
-                        
+
                         infoModalTitle.textContent = `Config: ${tunnelId}`;
                         infoModalBody.textContent = JSON.stringify(data.config, null, 2);
                         infoModal.classList.remove('hidden');
@@ -289,12 +291,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
                 method: 'DELETE',
             });
-            
+
             if (!response.ok) {
                 const data = await response.json();
                 throw new Error(data.detail || 'Failed to delete tunnel');
             }
-            
+
             alert(`Tunnel ${tunnelId} deleted successfully.`);
             fetchTunnels(); // Refresh the list
         } catch (error) {
