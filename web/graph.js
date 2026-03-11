@@ -141,7 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 width: edgeStyle.width,
                 font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' },
                 metrics_health: t.metrics ? t.metrics.health : "unknown",
-                smooth: { type: 'continuous' } // Ensure smooth curves
+                smooth: { type: 'dynamic' } // Allow multiple edges to curve dynamically without overlapping
             });
         });
 
