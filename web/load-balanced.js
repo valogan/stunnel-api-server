@@ -40,6 +40,37 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Dynamic Destinations Logic
+    const destinationsContainer = document.getElementById('destinationsContainer');
+    const addDstBtn = document.getElementById('addDstBtn');
+
+    if (addDstBtn && destinationsContainer) {
+        addDstBtn.addEventListener('click', () => {
+            const row = document.createElement('div');
+            row.className = 'destination-row';
+            row.style = 'display:flex; gap:10px; margin-bottom:10px;';
+            row.innerHTML = `
+                <input type="text" class="dst-input" required placeholder="e.g., 127.0.0.1:8874" style="flex:1;">
+                <button type="button" class="btn btn-secondary remove-dst-btn" style="padding:0 15px;">X</button>
+            `;
+            destinationsContainer.appendChild(row);
+            updateRemoveButtons();
+        });
+
+        destinationsContainer.addEventListener('click', (e) => {
+            if (e.target.classList.contains('remove-dst-btn')) {
+                e.target.closest('.destination-row').remove();
+                updateRemoveButtons();
+            }
+        });
+
+        function updateRemoveButtons() {
+            const rows = destinationsContainer.querySelectorAll('.destination-row');
+            const btns = destinationsContainer.querySelectorAll('.remove-dst-btn');
+            btns.forEach(btn => btn.disabled = rows.length === 1);
+        }
+    }
+
     // Handle Form Submission
     const createTunnelForm = document.getElementById('createTunnelForm');
     const submitBtn = document.getElementById('submitBtn');
@@ -53,6 +84,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // Hide previous messages
             formMessage.className = 'message hidden';
 
+            const dstInputs = document.querySelectorAll('.dst-input');
+            const destinations = Array.from(dstInputs).map(input => input.value.trim()).filter(val => val !== "");
+
             // Build payload for load-balanced endpoint
             const payload = {
                 src_region: document.getElementById('src_region').value,
@@ -60,9 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 src_port: document.getElementById('src_port').value,
                 dst_region: document.getElementById('dst_region').value,
                 dst_agent: document.getElementById('dst_agent').value,
-                dst_host: document.getElementById('dst_host').value,
-                dst_port_1: document.getElementById('dst_port_1').value,
-                dst_port_2: document.getElementById('dst_port_2').value,
+                destinations: destinations,
                 buffer_size: document.getElementById('buffer_size').value || "1024",
             };
 
