@@ -11,8 +11,8 @@ import uuid
 import asyncio
 
 from pycrescolib.clientlib import clientlib
-from haproxy_deploy import HAProxyDeployer
-from stunnel_direct import StunnelDirect
+from pycrescolib.haproxy import HAProxyDeployer
+from pycrescolib.stunnel import StunnelDirect
 from fastapi import Depends
 from sqlalchemy.orm import Session
 from database import Base, engine, get_db, TunnelRecord, SessionLocal

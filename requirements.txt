@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 pydantic
-pycrescolib
 sqlalchemy
 psycopg2-binary
 websockets
+cryptography>=36.0.0
+backoff>=2.0.0

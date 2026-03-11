@@ -1,9 +1,7 @@
 import logging
 import json
 from pycrescolib.clientlib import clientlib
-
-# Assuming the provided StunnelDirect class is saved in a file named stunnel_direct.py
-from stunnel_direct import StunnelDirect
+from pycrescolib.stunnel import StunnelDirect
 
 def main():
     # 1. Setup logging
