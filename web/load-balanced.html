@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cresco Tunnel Manager</title>
+    <title>Load Balanced Tunnel - Cresco</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 </head>
@@ -15,18 +15,21 @@
             <h1>Cresco Tunnel Manager</h1>
             <p>Manage and monitor your stunnel pipelines</p>
             <nav class="header-nav">
-                <a href="index.html" class="nav-link active">Home</a>
-                <a href="load-balanced.html" class="nav-link">Load Balanced</a>
+                <a href="index.html" class="nav-link">Home</a>
+                <a href="load-balanced.html" class="nav-link active">Load Balanced</a>
                 <a href="agents.html" class="nav-link">Agents</a>
                 <a href="graph.html" class="nav-link">Graph View</a>
             </nav>
         </header>
 
         <main>
-            <!-- TUNNELS VIEW (Default) -->
             <div id="view-tunnels">
                 <section class="card create-tunnel">
-                    <h2>Create New Tunnel</h2>
+                    <h2>Create Load Balanced Tunnels & HAProxy</h2>
+                    <p class="text-muted" style="margin-bottom: 20px; font-size: 14px;">
+                        This will deploy two tunnels on randomized local ports and configure a local HAProxy instance
+                        to round-robin traffic between them for increased availability.
+                    </p>
                     <form id="createTunnelForm">
                         <div class="form-grid">
                             <div class="form-group">
@@ -35,11 +38,11 @@
                             </div>
                             <div class="form-group">
                                 <label for="src_agent">Source Agent</label>
-                                <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-agent-1">
+                                <input type="text" id="src_agent" required placeholder="e.g., model-tunnel-global-controller">
                             </div>
                             <div class="form-group">
-                                <label for="src_port">Source Port</label>
-                                <input type="text" id="src_port" required placeholder="e.g., 8080">
+                                <label for="src_port">Source HAProxy Bind Port</label>
+                                <input type="text" id="src_port" required placeholder="e.g., 8048">
                             </div>
                             <div class="form-group">
                                 <label for="dst_region">Destination Region</label>
@@ -47,36 +50,36 @@
                             </div>
                             <div class="form-group">
                                 <label for="dst_agent">Destination Agent</label>
-                                <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent2">
+                                <input type="text" id="dst_agent" required placeholder="e.g., model-tunnel-agent-1">
                             </div>
                             <div class="form-group">
                                 <label for="dst_host">Destination Host</label>
                                 <input type="text" id="dst_host" required placeholder="e.g., 127.0.0.1">
                             </div>
                             <div class="form-group">
-                                <label for="dst_port">Destination Port</label>
-                                <input type="text" id="dst_port" required placeholder="e.g., 80">
+                                <label for="dst_port_1">Destination Port 1</label>
+                                <input type="text" id="dst_port_1" required placeholder="e.g., 8874">
+                            </div>
+                            <div class="form-group">
+                                <label for="dst_port_2">Destination Port 2</label>
+                                <input type="text" id="dst_port_2" required placeholder="e.g., 8875">
                             </div>
                             <div class="form-group">
                                 <label for="buffer_size">Buffer Size</label>
                                 <input type="text" id="buffer_size" value="1024" required>
                             </div>
-                            <div class="form-group">
-                                <label for="stunnel_plugin_id">Plugin ID</label>
-                                <input type="text" id="stunnel_plugin_id" placeholder="Optional/Auto-detected">
-                            </div>
                         </div>
                         <button type="submit" class="btn btn-primary" id="submitBtn">
-                            <span class="btn-text">Create Tunnel</span>
+                            <span class="btn-text">Create Setup</span>
                             <div class="loader hidden"></div>
                         </button>
-                        <div id="formMessage" class="message hidden"></div>
+                        <div id="formMessage" class="message hidden" style="margin-top:20px; word-break: break-all;"></div>
                     </form>
                 </section>
-
+                
                 <section class="card tunnel-list">
                     <div class="section-header">
-                        <h2>Active Tunnels</h2>
+                        <h2>All Active Tunnels</h2>
                         <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
                     </div>
                     <div class="table-container">
@@ -128,7 +131,7 @@
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <script src="load-balanced.js"></script>
 </body>
 
 </html>

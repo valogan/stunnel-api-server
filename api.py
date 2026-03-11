@@ -11,6 +11,7 @@ import uuid
 import asyncio
 
 from pycrescolib.clientlib import clientlib
+from haproxy_deploy import HAProxyDeployer
 from stunnel_direct import StunnelDirect
 from fastapi import Depends
 from sqlalchemy.orm import Session
@@ -314,6 +315,16 @@ class TunnelCreateRequest(BaseModel):
     dst_port: str
     buffer_size: str = "1024"
 
+class LoadBalancedTunnelRequest(BaseModel):
+    src_region: str
+    src_agent: str
+    src_port: str
+    dst_region: str
+    dst_agent: str
+    dst_host: str
+    dst_port_1: str
+    dst_port_2: str
+    buffer_size: str = "1024"
 # --- Endpoints ---
 
 @app.get("/")
@@ -459,9 +470,145 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
         }
     }
 
+@app.post("/tunnels-load-balanced")
+def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = Depends(get_db)):
+    """
+    Launch two tunnels to a destination and configure HAProxy locally to round-robin between them.
+    req.src_port will be what HAProxy binds to locally.
+    """
+    if not stunnel_manager or not cresco_client:
+         raise HTTPException(status_code=500, detail="Stunnel manager or Cresco client not initialized.")
+         
+    import random
+    import uuid
+    
+    tunnel1_port = str(random.randint(10000, 60000))
+    tunnel2_port = str(random.randint(10000, 60000))
+    
+    tunnel1_id = str(uuid.uuid1())
+    tunnel2_id = str(uuid.uuid1())
+    
+    # Hop 1: Tunnel 1
+    response_1 = stunnel_manager.create_tunnel(
+        stunnel_id=tunnel1_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=tunnel1_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port_1,
+        buffer_size=req.buffer_size
+    )
+
+    # Hop 2: Tunnel 2
+    response_2 = stunnel_manager.create_tunnel(
+        stunnel_id=tunnel2_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=tunnel2_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port_2,
+        buffer_size=req.buffer_size
+    )
+
+    if response_1 is None or response_2 is None:
+        raise HTTPException(status_code=400, detail="Failed to create tunnels.")
+        
+    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    
+    # Save to local db
+    db_tunnel_1 = TunnelRecord(
+        stunnel_id=tunnel1_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=tunnel1_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port_1,
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=src_plugin_id
+    )
+    db.add(db_tunnel_1)
+    
+    db_tunnel_2 = TunnelRecord(
+        stunnel_id=tunnel2_id,
+        src_region=req.src_region,
+        src_agent=req.src_agent,
+        src_port=tunnel2_port,
+        dst_region=req.dst_region,
+        dst_agent=req.dst_agent,
+        dst_host=req.dst_host,
+        dst_port=req.dst_port_2,
+        buffer_size=req.buffer_size,
+        stunnel_plugin_id=src_plugin_id
+    )
+    db.add(db_tunnel_2)
+    db.commit()
+    
+    # Now deploy and configure HAProxy
+    deployer = HAProxyDeployer(cresco_client, logger)
+    jar_url = "https://github.com/valogan/cresco-haproxy-plugin/releases/download/third/haproxy-1.2-SNAPSHOT.jar"
+    
+    pipeline_id = deployer.deploy_haproxy_plugin(req.src_region, req.src_agent, jar_url)
+    
+    if not pipeline_id:
+        raise HTTPException(status_code=500, detail="Failed to deploy HAProxy plugin.")
+        
+    pipeline_config = cresco_client.globalcontroller.get_pipeline_info(pipeline_id)
+    plugin_id = pipeline_config['nodes'][0]['node_id']
+    
+    haproxy_config = f"""
+global
+    log 127.0.0.1 local0
+    maxconn 4096
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    retries 3
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+frontend my_proxy
+    bind *:{req.src_port}
+    default_backend tunnel_backend
+
+backend tunnel_backend
+    balance roundrobin
+    server t1 127.0.0.1:{tunnel1_port} check
+    server t2 127.0.0.1:{tunnel2_port} check
+"""
+
+    cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
+        'action': 'build_config',
+        'haproxy_config_data': haproxy_config
+    }, req.src_region, req.src_agent, plugin_id)
+    
+    cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
+        'action': 'start_haproxy'
+    }, req.src_region, req.src_agent, plugin_id)
+    
+    return {
+        "message": f"Load balanced tunnels created and HAProxy configured successfully on port {req.src_port}.",
+        "data": {
+            "tunnel1": tunnel1_id,
+            "tunnel2": tunnel2_id,
+            "haproxy_pipeline": pipeline_id,
+            "haproxy_plugin": plugin_id
+        }
+    }
+
 
 @app.options("/tunnels")
 @app.options("/tunnels-proxy")
+@app.options("/tunnels-load-balanced")
 async def tunnels_preflight(request: Request):
     """Handle CORS preflight requests for /tunnels explicitly.
     This ensures OPTIONS requests receive the appropriate CORS headers
