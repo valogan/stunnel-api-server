@@ -321,9 +321,7 @@ class LoadBalancedTunnelRequest(BaseModel):
     src_port: str
     dst_region: str
     dst_agent: str
-    dst_host: str
-    dst_port_1: str
-    dst_port_2: str
+    destinations: list[str]
     buffer_size: str = "1024"
 # --- Endpoints ---
 
@@ -479,74 +477,58 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
     if not stunnel_manager or not cresco_client:
          raise HTTPException(status_code=500, detail="Stunnel manager or Cresco client not initialized.")
          
+    if not req.destinations:
+         raise HTTPException(status_code=400, detail="At least one destination must be provided.")
+         
     import random
     import uuid
     
-    tunnel1_port = str(random.randint(10000, 60000))
-    tunnel2_port = str(random.randint(10000, 60000))
-    
-    tunnel1_id = str(uuid.uuid1())
-    tunnel2_id = str(uuid.uuid1())
-    
-    # Hop 1: Tunnel 1
-    response_1 = stunnel_manager.create_tunnel(
-        stunnel_id=tunnel1_id,
-        src_region=req.src_region,
-        src_agent=req.src_agent,
-        src_port=tunnel1_port,
-        dst_region=req.dst_region,
-        dst_agent=req.dst_agent,
-        dst_host=req.dst_host,
-        dst_port=req.dst_port_1,
-        buffer_size=req.buffer_size
-    )
-
-    # Hop 2: Tunnel 2
-    response_2 = stunnel_manager.create_tunnel(
-        stunnel_id=tunnel2_id,
-        src_region=req.src_region,
-        src_agent=req.src_agent,
-        src_port=tunnel2_port,
-        dst_region=req.dst_region,
-        dst_agent=req.dst_agent,
-        dst_host=req.dst_host,
-        dst_port=req.dst_port_2,
-        buffer_size=req.buffer_size
-    )
-
-    if response_1 is None or response_2 is None:
-        raise HTTPException(status_code=400, detail="Failed to create tunnels.")
-        
     src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
     
-    # Save to local db
-    db_tunnel_1 = TunnelRecord(
-        stunnel_id=tunnel1_id,
-        src_region=req.src_region,
-        src_agent=req.src_agent,
-        src_port=tunnel1_port,
-        dst_region=req.dst_region,
-        dst_agent=req.dst_agent,
-        dst_host=req.dst_host,
-        dst_port=req.dst_port_1,
-        buffer_size=req.buffer_size,
-        stunnel_plugin_id=src_plugin_id
-    )
-    db.add(db_tunnel_1)
+    tunnel_ids = []
+    haproxy_servers = []
     
-    db_tunnel_2 = TunnelRecord(
-        stunnel_id=tunnel2_id,
-        src_region=req.src_region,
-        src_agent=req.src_agent,
-        src_port=tunnel2_port,
-        dst_region=req.dst_region,
-        dst_agent=req.dst_agent,
-        dst_host=req.dst_host,
-        dst_port=req.dst_port_2,
-        buffer_size=req.buffer_size,
-        stunnel_plugin_id=src_plugin_id
-    )
-    db.add(db_tunnel_2)
+    for i, dest in enumerate(req.destinations):
+        if ":" not in dest:
+            raise HTTPException(status_code=400, detail=f"Invalid destination format: '{dest}'. Expected 'host:port'.")
+            
+        dst_host, dst_port = dest.split(":", 1)
+        tunnel_port = str(random.randint(10000, 60000))
+        tunnel_id = str(uuid.uuid1())
+        
+        response = stunnel_manager.create_tunnel(
+            stunnel_id=tunnel_id,
+            src_region=req.src_region,
+            src_agent=req.src_agent,
+            src_port=tunnel_port,
+            dst_region=req.dst_region,
+            dst_agent=req.dst_agent,
+            dst_host=dst_host,
+            dst_port=dst_port,
+            buffer_size=req.buffer_size
+        )
+
+        if response is None:
+            raise HTTPException(status_code=400, detail=f"Failed to create tunnel for {dest}.")
+
+        # Save to local db
+        db_tunnel = TunnelRecord(
+            stunnel_id=tunnel_id,
+            src_region=req.src_region,
+            src_agent=req.src_agent,
+            src_port=tunnel_port,
+            dst_region=req.dst_region,
+            dst_agent=req.dst_agent,
+            dst_host=dst_host,
+            dst_port=dst_port,
+            buffer_size=req.buffer_size,
+            stunnel_plugin_id=src_plugin_id
+        )
+        db.add(db_tunnel)
+        
+        tunnel_ids.append(tunnel_id)
+        haproxy_servers.append(f"    server t{i+1} 127.0.0.1:{tunnel_port} check")
+        
     db.commit()
     
     # Now deploy and configure HAProxy
@@ -560,6 +542,8 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
         
     pipeline_config = cresco_client.globalcontroller.get_pipeline_info(pipeline_id)
     plugin_id = pipeline_config['nodes'][0]['node_id']
+    
+    servers_block = "\n".join(haproxy_servers)
     
     haproxy_config = f"""
 global
@@ -582,8 +566,7 @@ frontend my_proxy
 
 backend tunnel_backend
     balance roundrobin
-    server t1 127.0.0.1:{tunnel1_port} check
-    server t2 127.0.0.1:{tunnel2_port} check
+{servers_block}
 """
 
     cresco_client.messaging.global_plugin_msgevent(True, 'CONFIG', {
@@ -598,8 +581,7 @@ backend tunnel_backend
     return {
         "message": f"Load balanced tunnels created and HAProxy configured successfully on port {req.src_port}.",
         "data": {
-            "tunnel1": tunnel1_id,
-            "tunnel2": tunnel2_id,
+            "tunnels": tunnel_ids,
             "haproxy_pipeline": pipeline_id,
             "haproxy_plugin": plugin_id
         }
