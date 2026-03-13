@@ -799,11 +799,12 @@ def get_agents():
         raise HTTPException(status_code=500, detail=f"Failed to fetch agents: {str(e)}")
 
 @app.get("/agents/with-stunnel-plugins")
-def get_agents_with_stunnel_plugins():
+def get_agents_with_stunnel_plugins(detailed: bool = Query(False, description="Include detailed tunnel configuration with port information")):
     """
     Retrieve a list of agents and find stunnel plugins on each agent.
     Returns agents with their stunnel plugin IDs if found.
     """
+    logger.info(f"GET /agents/with-stunnel-plugins called with detailed={detailed}")
     if not cresco_client:
         raise HTTPException(status_code=500, detail="Cresco client not connected.")
     if not stunnel_manager:
@@ -840,19 +841,58 @@ def get_agents_with_stunnel_plugins():
                 try:
                     tunnel_list = stunnel_manager.get_tunnel_list(region, agent_name, plugin_id)
                     if tunnel_list:
-                        tunnels = tunnel_list
+                        # Enhance tunnel data with detailed configuration if requested
+                        enhanced_tunnels = []
+                        for tunnel in tunnel_list:
+                            enhanced_tunnel = {
+                                "stunnel_id": tunnel.get("stunnel_id"),
+                                "status": tunnel.get("status")
+                            }
+                            
+                            # If detailed flag is True, fetch tunnel configuration
+                            if detailed and tunnel.get("stunnel_id"):
+                                logger.info(f"Fetching config for tunnel {tunnel['stunnel_id']} on {region}/{agent_name}")
+                                try:
+                                    config = stunnel_manager.get_tunnel_config(
+                                        src_region=region,
+                                        src_agent=agent_name,
+                                        src_plugin_id=plugin_id,
+                                        stunnel_id=tunnel["stunnel_id"]
+                                    )
+                                    if config:
+                                        enhanced_tunnel["config"] = config
+                                        # Extract key fields for easier access
+                                        enhanced_tunnel["src_port"] = config.get("src_port")
+                                        enhanced_tunnel["dst_port"] = config.get("dst_port")
+                                        enhanced_tunnel["dst_host"] = config.get("dst_host")
+                                        enhanced_tunnel["dst_region"] = config.get("dst_region")
+                                        enhanced_tunnel["dst_agent"] = config.get("dst_agent")
+                                        enhanced_tunnel["dst_plugin"] = config.get("dst_plugin")
+                                        enhanced_tunnel["buffer_size"] = config.get("buffer_size")
+                                        logger.info(f"Added config for tunnel {tunnel['stunnel_id']}: src_port={config.get('src_port')}, dst_port={config.get('dst_port')}")
+                                    else:
+                                        logger.warning(f"No config returned for tunnel {tunnel['stunnel_id']}")
+                                except Exception as e:
+                                    logger.warning(f"Error fetching config for tunnel {tunnel['stunnel_id']}: {e}")
+                            
+                            enhanced_tunnels.append(enhanced_tunnel)
+                        
+                        tunnels = enhanced_tunnels
                 except Exception as e:
                     logger.warning(f"Error getting tunnels from {region}/{agent_name}: {e}")
             
             enhanced_agent["tunnels"] = tunnels
             enhanced_agents.append(enhanced_agent)
         
-        return {
+        result = {
             "agents": enhanced_agents,
             "total_agents": len(enhanced_agents),
             "agents_with_stunnel": len([a for a in enhanced_agents if a["stunnel_plugin_found"]]),
-            "total_tunnels": sum(len(a["tunnels"]) for a in enhanced_agents)
+            "total_tunnels": sum(len(a["tunnels"]) for a in enhanced_agents),
+            "detailed": detailed
         }
+        logger.info(f"Returning response with detailed={detailed}")
+        return result
     except Exception as e:
         logger.error(f"Failed to fetch agents with stunnel plugins: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch agents with stunnel plugins: {str(e)}")
