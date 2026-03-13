@@ -798,6 +798,65 @@ def get_agents():
         logger.error(f"Failed to fetch agent list: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch agents: {str(e)}")
 
+@app.get("/agents/with-stunnel-plugins")
+def get_agents_with_stunnel_plugins():
+    """
+    Retrieve a list of agents and find stunnel plugins on each agent.
+    Returns agents with their stunnel plugin IDs if found.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+    if not stunnel_manager:
+        raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
+        
+    try:
+        logger.info("Fetching agent list and checking for stunnel plugins...")
+        agents = cresco_client.globalcontroller.get_agent_list()
+        
+        enhanced_agents = []
+        for agent in agents:
+            region = agent.get('region') or agent.get('region_id')
+            agent_name = agent.get('agent') or agent.get('agent_id')
+            
+            if not region or not agent_name:
+                continue
+                
+            # Find stunnel plugin on this agent
+            plugin_id = None
+            try:
+                plugin_id = stunnel_manager.find_existing_stunnel_plugin(region, agent_name)
+            except Exception as e:
+                logger.warning(f"Error finding stunnel plugin on {region}/{agent_name}: {e}")
+            
+            enhanced_agent = {
+                **agent,
+                "stunnel_plugin_found": plugin_id is not None,
+                "stunnel_plugin_id": plugin_id
+            }
+            
+            # If plugin found, get tunnels from this agent
+            tunnels = []
+            if plugin_id:
+                try:
+                    tunnel_list = stunnel_manager.get_tunnel_list(region, agent_name, plugin_id)
+                    if tunnel_list:
+                        tunnels = tunnel_list
+                except Exception as e:
+                    logger.warning(f"Error getting tunnels from {region}/{agent_name}: {e}")
+            
+            enhanced_agent["tunnels"] = tunnels
+            enhanced_agents.append(enhanced_agent)
+        
+        return {
+            "agents": enhanced_agents,
+            "total_agents": len(enhanced_agents),
+            "agents_with_stunnel": len([a for a in enhanced_agents if a["stunnel_plugin_found"]]),
+            "total_tunnels": sum(len(a["tunnels"]) for a in enhanced_agents)
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch agents with stunnel plugins: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch agents with stunnel plugins: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
