@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cresco Agent Discovery</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        #agentNetwork {
+            width: 100%;
+            height: 600px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background-color: var(--bg-main);
+        }
+
+        .agent-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .agent-card.has-stunnel {
+            border-left: 4px solid var(--success);
+        }
+
+        .agent-card.no-stunnel {
+            border-left: 4px solid var(--warning);
+        }
+
+        .agent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .agent-id {
+            font-weight: 600;
+            font-size: 1.1em;
+            color: var(--text-primary);
+        }
+
+        .stunnel-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+
+        .stunnel-present {
+            background-color: var(--success-light);
+            color: var(--success);
+        }
+
+        .stunnel-absent {
+            background-color: var(--warning-light);
+            color: var(--warning);
+        }
+
+        .tunnel-list {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .tunnel-item {
+            background: var(--bg-main);
+            padding: 8px 12px;
+            margin-bottom: 5px;
+            border-radius: 6px;
+            border: 1px solid var(--border-light);
+            font-size: 0.9em;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 15px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: 600;
+            color: var(--primary);
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            color: var(--text-secondary);
+            margin-top: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Cresco Agent Discovery</h1>
+            <p>Discover agents and their stunnel plugins in real-time</p>
+            <nav class="header-nav">
+                <a href="index.html" class="nav-link">Home</a>
+                <a href="load-balanced.html" class="nav-link">Load Balanced</a>
+                <a href="agents.html" class="nav-link">Agents</a>
+                <a href="graph.html" class="nav-link">Graph View</a>
+                <a href="agent-discovery.html" class="nav-link active">Agent Discovery</a>
+            </nav>
+        </header>
+
+        <main>
+            <section class="card">
+                <div class="section-header">
+                    <h2>Agent Discovery Dashboard</h2>
+                    <div>
+                        <button id="refreshBtn" class="btn btn-primary">Refresh Discovery</button>
+                        <button id="toggleViewBtn" class="btn btn-secondary">Toggle View</button>
+                    </div>
+                </div>
+
+                <p>This view queries all agents in the Cresco network and checks for stunnel plugins on each agent using
+                    <code>find_existing_stunnel_plugin()</code>. It's smarter than pulling from the database because it
+                    shows real-time plugin status.
+                </p>
+
+                <div class="stats-grid" id="statsContainer">
+                    <!-- Stats will be populated by JavaScript -->
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="section-header">
+                    <h2>Agent Network Visualization</h2>
+                    <div class="view-controls">
+                        <label>
+                            <input type="checkbox" id="showTunnels" checked> Show Tunnels
+                        </label>
+                        <label>
+                            <input type="checkbox" id="showAgentsWithoutStunnel" checked> Show All Agents
+                        </label>
+                        <label>
+                            <input type="checkbox" id="showEdgeLabels" checked> Show Edge Labels
+                        </label>
+                        <button id="togglePhysicsBtn" class="btn btn-small btn-secondary">Physics: On</button>
+                        <button id="relayoutBtn" class="btn btn-small btn-secondary">Re-layout</button>
+                        <button id="addEdgeBtn" class="btn btn-small btn-primary">Add Edge</button>
+                    </div>
+                </div>
+                <div id="agentNetwork"></div>
+            </section>
+
+            <section class="card">
+                <div class="section-header">
+                    <h2>Agent Details</h2>
+                    <div class="search-controls">
+                        <input type="text" id="agentSearch" placeholder="Search agents..." class="search-input">
+                    </div>
+                </div>
+                <div id="agentList">
+                    <!-- Agent cards will be populated by JavaScript -->
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- API Config Modal -->
+    <div id="configModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>API Configuration</h2>
+            <p>Verify or update the API endpoint URL</p>
+            <div class="form-group">
+                <label for="apiUrl">API URL</label>
+                <input type="url" id="apiUrl" value="http://localhost:8005">
+            </div>
+            <button id="saveConfigBtn" class="btn btn-primary">Save & Reload</button>
+        </div>
+    </div>
+    <div id="configToggle" class="config-toggle" title="Settings">⚙️</div>
+
+    <!-- Edge Creation Modal -->
+    <div id="edgeModal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Create Tunnel</h2>
+            <p id="edgeModalDesc">Configure ports for the new tunnel.</p>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="edgeSrcPort">Source Port</label>
+                    <input type="number" id="edgeSrcPort" required placeholder="e.g., 8080">
+                </div>
+                <div class="form-group">
+                    <label for="edgeDstPort">Destination Port</label>
+                    <input type="number" id="edgeDstPort" required placeholder="e.g., 80">
+                </div>
+                <div class="form-group">
+                    <label for="edgeDstHost">Destination Host</label>
+                    <input type="text" id="edgeDstHost" value="127.0.0.1" required>
+                </div>
+                <div class="form-group">
+                    <label for="edgeBufferSize">Buffer Size</label>
+                    <input type="number" id="edgeBufferSize" value="1024" required>
+                </div>
+            </div>
+            <div style="margin-top: 15px; display: flex; gap: 10px;">
+                <button id="saveEdgeBtn" class="btn btn-primary">Create Tunnel</button>
+                <button id="cancelEdgeBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="agent-discovery.js"></script>
+</body>
+
+</html>
