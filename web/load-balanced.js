@@ -1,4 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // Check authentication first
+    if (!checkAuth()) return;
+
     // Determine default API URL
     const defaultApiUrl = `/api`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
@@ -105,12 +108,11 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const response = await fetch(`${API_URL}/tunnels-load-balanced`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify(payload)
                 });
+
+                if (handleAuthError(response)) return;
 
                 const data = await response.json();
 
@@ -150,7 +152,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!tbody) return;
 
         try {
-            const response = await fetch(`${API_URL}/tunnels`);
+            const response = await fetch(`${API_URL}/tunnels`, {
+                headers: getAuthHeaders()
+            });
+            
+            if (handleAuthError(response)) return;
+            
             if (!response.ok) {
                 throw new Error('Failed to fetch tunnels');
             }

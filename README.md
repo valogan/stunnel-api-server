@@ -554,6 +554,133 @@ PyCrescoLib is designed for a variety of distributed computing scenarios:
 
 ---
 
+## API Server Authentication
+
+The Cresco Tunnel Manager API server supports dual authentication methods:
+
+### Authentication Methods
+
+1. **API Key Authentication** (for programmatic access)
+   - Use the `X-API-Key` header with your API key
+   - Best for scripts, CI/CD pipelines, and automated systems
+
+2. **JWT Token Authentication** (for web portal access)
+   - Obtain a token via the `/token` endpoint
+   - Use the `Authorization: Bearer <token>` header
+   - Best for web portal users
+
+### Configuration
+
+Add the following to your `config.ini`:
+
+```ini
+[auth]
+# Secret key for JWT token signing. Generate a secure random key for production.
+# Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+secret_key=your-secret-key-change-me-in-production
+# JWT token algorithm (default: HS256)
+algorithm=HS256
+# Token expiration time in minutes (default: 30)
+access_token_expire_minutes=30
+```
+
+### Default Admin User
+
+On first startup, a default admin user is created:
+- **Username**: `admin`
+- **Password**: `admin`
+
+**Important**: Change this password immediately in production!
+
+### API Endpoints
+
+#### Authentication Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/token` | POST | Login to obtain JWT token (form-data: username, password) |
+| `/users/me` | GET | Get current user info |
+| `/users` | GET | List all users (admin only) |
+| `/users` | POST | Create a new user (admin only) |
+| `/users/{user_id}/deactivate` | PUT | Deactivate a user (admin only) |
+
+#### API Key Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api-keys` | GET | List all API keys |
+| `/api-keys` | POST | Create a new API key |
+| `/api-keys/{key_id}` | DELETE | Delete an API key |
+| `/api-keys/{key_id}/deactivate` | PUT | Deactivate an API key |
+
+### Usage Examples
+
+#### Programmatic Access (API Key)
+
+```bash
+# Create an API key first (via web portal or with JWT token)
+# Then use it in your requests:
+
+curl -X GET "http://localhost:8000/tunnels" \
+  -H "X-API-Key: your-api-key-here"
+```
+
+```python
+import requests
+
+API_URL = "http://localhost:8000"
+API_KEY = "your-api-key-here"
+
+headers = {"X-API-Key": API_KEY}
+
+# Get tunnels
+response = requests.get(f"{API_URL}/tunnels", headers=headers)
+tunnels = response.json()
+
+# Create a tunnel
+payload = {
+    "src_region": "region1",
+    "src_agent": "agent1",
+    "src_port": "8080",
+    "dst_region": "region2",
+    "dst_agent": "agent2",
+    "dst_host": "127.0.0.1",
+    "dst_port": "80",
+    "buffer_size": "1024"
+}
+response = requests.post(f"{API_URL}/tunnels", json=payload, headers=headers)
+```
+
+#### Web Portal Access (JWT Token)
+
+```python
+import requests
+
+API_URL = "http://localhost:8000"
+
+# Login to get token
+login_data = {"username": "admin", "password": "admin"}
+response = requests.post(f"{API_URL}/token", data=login_data)
+token = response.json()["access_token"]
+
+# Use token in subsequent requests
+headers = {"Authorization": f"Bearer {token}"}
+response = requests.get(f"{API_URL}/tunnels", headers=headers)
+```
+
+### Web Portal
+
+The web portal automatically handles authentication:
+
+1. Navigate to the web portal in your browser
+2. You'll be redirected to the login page if not authenticated
+3. Enter your credentials to log in
+4. The token is stored in localStorage and automatically included in API requests
+
+To log out, click the "Logout" button in the navigation bar.
+
+---
+
 ## Contributing to PyCrescoLib
 
 [Contribution guidelines to be provided]

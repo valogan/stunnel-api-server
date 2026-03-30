@@ -1,4 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // Check authentication first
+    if (!checkAuth()) return;
+
     // Determine default API URL
     const defaultApiUrl = `http://${window.location.hostname}:8005`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
@@ -50,13 +53,19 @@ document.addEventListener('DOMContentLoaded', () => {
     async function fetchDataAndDraw() {
         try {
             // Fetch Agents
-            const agentsRes = await fetch(`${API_URL}/agents`);
+            const agentsRes = await fetch(`${API_URL}/agents`, {
+                headers: getAuthHeaders()
+            });
+            if (handleAuthError(agentsRes)) return;
             if (!agentsRes.ok) throw new Error('Failed to fetch agents');
             const agentsData = await agentsRes.json();
             const agents = agentsData.agents || [];
 
             // Fetch Tunnels
-            const tunnelsRes = await fetch(`${API_URL}/tunnels`);
+            const tunnelsRes = await fetch(`${API_URL}/tunnels`, {
+                headers: getAuthHeaders()
+            });
+            if (handleAuthError(tunnelsRes)) return;
             if (!tunnelsRes.ok) throw new Error('Failed to fetch tunnels');
             const tunnelsData = await tunnelsRes.json();
             const tunnels = tunnelsData.database_tunnels || [];

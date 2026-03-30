@@ -1,4 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // Check authentication first
+    if (!checkAuth()) return;
+
     // Determine default API URL
     const defaultApiUrl = `/api`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
@@ -52,7 +55,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">Loading agents...</td></tr>`;
-            const response = await fetch(`${API_URL}/agents`);
+            const response = await fetch(`${API_URL}/agents`, {
+                headers: getAuthHeaders()
+            });
+            
+            if (handleAuthError(response)) return;
+            
             const data = await response.json();
 
             if (!response.ok) {
@@ -130,7 +138,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/agents/${region}/${agent}/restart`, {
                 method: 'POST',
+                headers: getAuthHeaders()
             });
+            
+            if (handleAuthError(response)) return;
             
             if (!response.ok) {
                 const data = await response.json();
@@ -151,7 +162,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/agents/${region}/${agent}/stop`, {
                 method: 'POST',
+                headers: getAuthHeaders()
             });
+            
+            if (handleAuthError(response)) return;
             
             if (!response.ok) {
                 const data = await response.json();

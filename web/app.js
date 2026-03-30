@@ -3,6 +3,43 @@ document.addEventListener('DOMContentLoaded', () => {
     const defaultApiUrl = `/api`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
 
+    // --- Authentication Helper Functions ---
+    function getAuthHeaders() {
+        const token = localStorage.getItem('access_token');
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        };
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        }
+        return headers;
+    }
+
+    function checkAuth() {
+        const token = localStorage.getItem('access_token');
+        if (!token) {
+            window.location.href = 'login.html';
+            return false;
+        }
+        return true;
+    }
+
+    function handleAuthError(response) {
+        if (response.status === 401) {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('token_type');
+            window.location.href = 'login.html';
+            return true;
+        }
+        return false;
+    }
+
+    // Check authentication on page load
+    if (!checkAuth()) {
+        return;
+    }
+
     // UI Elements
     const apiUrlInput = document.getElementById('apiUrl');
     const configModal = document.getElementById('configModal');
@@ -68,12 +105,11 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/tunnels`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
+                headers: getAuthHeaders(),
                 body: JSON.stringify(payload)
             });
+
+            if (handleAuthError(response)) return;
 
             const data = await response.json();
 
@@ -110,7 +146,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const tbody = document.getElementById('tunnelsBody');
 
         try {
-            const response = await fetch(`${API_URL}/tunnels`);
+            const response = await fetch(`${API_URL}/tunnels`, {
+                headers: getAuthHeaders()
+            });
+            
+            if (handleAuthError(response)) return;
+            
             if (!response.ok) {
                 throw new Error('Failed to fetch tunnels');
             }
@@ -173,8 +214,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Now that the row is added, asynchronously check the live status if we have the plugin ID
                 // (This avoids waiting for all status checks before rendering the table)
                 if (t.stunnel_plugin_id && t.stunnel_plugin_id !== 'null') {
-                    fetch(`${API_URL}/tunnels/${t.stunnel_id}/status?src_region=${t.src_region}&src_agent=${t.src_agent}&src_plugin_id=${t.stunnel_plugin_id}`)
+                    fetch(`${API_URL}/tunnels/${t.stunnel_id}/status?src_region=${t.src_region}&src_agent=${t.src_agent}&src_plugin_id=${t.stunnel_plugin_id}`, {
+                        headers: getAuthHeaders()
+                    })
                         .then(res => {
+                            if (handleAuthError(res)) return;
                             if (!res.ok) throw new Error('Status fetch failed');
                             return res.json();
                         })
@@ -237,7 +281,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
 
                     try {
-                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/status?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
+                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/status?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`, {
+                            headers: getAuthHeaders()
+                        });
+                        if (handleAuthError(response)) return;
                         if (!response.ok) throw new Error('Failed to fetch status');
                         const data = await response.json();
 
@@ -264,7 +311,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
 
                     try {
-                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/config?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`);
+                        const response = await fetch(`${API_URL}/tunnels/${tunnelId}/config?src_region=${region}&src_agent=${agent}&src_plugin_id=${plugin}`, {
+                            headers: getAuthHeaders()
+                        });
+                        if (handleAuthError(response)) return;
                         if (!response.ok) throw new Error('Failed to fetch config');
                         const data = await response.json();
 
@@ -290,7 +340,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
                 method: 'DELETE',
+                headers: getAuthHeaders()
             });
+
+            if (handleAuthError(response)) return;
 
             if (!response.ok) {
                 const data = await response.json();

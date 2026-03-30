@@ -6,3 +6,6 @@ psycopg2-binary
 websockets
 cryptography>=36.0.0
 backoff>=2.0.0
+python-jose[cryptography]
+bcrypt
+python-multipart

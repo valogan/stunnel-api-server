@@ -7,3 +7,18 @@ service_key=
 region=
 agent=
 host=localhost
+
+[auth]
+# Secret key for JWT token signing. Generate a secure random key for production.
+# You can generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+secret_key=your-secret-key-change-me-in-production
+# JWT token algorithm (default: HS256)
+algorithm=HS256
+# Token expiration time in minutes (default: 30)
+access_token_expire_minutes=30
+
+[cors]
+# Comma-separated list of allowed origins for CORS.
+# Required when using authentication (allow_credentials=True cannot use "*")
+# Example: http://localhost:8000,http://localhost:8005,https://yourdomain.com
+allow_origins=http://localhost:8000,http://localhost:8005

@@ -1,23 +1,30 @@
 import logging
 import configparser
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi import Request
 from fastapi.responses import Response
+from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
+from fastapi import Depends, Security
 import time
 import uuid
 import asyncio
+import secrets
 
 from pycrescolib.clientlib import clientlib
 from pycrescolib.haproxy import HAProxyDeployer
 from pycrescolib.stunnel import StunnelDirect
-from fastapi import Depends
 from sqlalchemy.orm import Session
-from database import Base, engine, get_db, TunnelRecord, SessionLocal
+from database import Base, engine, get_db, TunnelRecord, SessionLocal, UserRecord, APIKeyRecord
 import threading
 import re
+
+# JWT imports
+from jose import JWTError, jwt
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +36,119 @@ stunnel_manager = None
 proxy_region = None
 proxy_agent = None
 proxy_host = None
+
+# --- Authentication Configuration ---
+# These will be loaded from config.ini
+AUTH_SECRET_KEY = None
+AUTH_ALGORITHM = "HS256"
+AUTH_ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# --- CORS Configuration ---
+# Load CORS origins at module level (needed before middleware is added)
+def _load_cors_origins():
+    """Load CORS origins from config.ini at module load time"""
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    try:
+        origins_str = config.get('cors', 'allow_origins')
+        return [origin.strip() for origin in origins_str.split(',') if origin.strip()]
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        # Default origins for development
+        return ["http://localhost:8000", "http://localhost:8005"]
+
+CORS_ORIGINS = _load_cors_origins()
+
+# Security schemes for dual authentication
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+# --- Authentication Helper Functions ---
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a JWT access token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=AUTH_ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, AUTH_SECRET_KEY, algorithm=AUTH_ALGORITHM)
+    return encoded_jwt
+
+
+def verify_token(token: str) -> Optional[str]:
+    """Verify a JWT token and return the username if valid"""
+    try:
+        payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+        return username
+    except JWTError:
+        return None
+
+
+async def get_current_user(
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+    api_key: str = Depends(api_key_header)
+) -> dict:
+    """
+    Dual authentication: Accept either API key or JWT token.
+    Returns a dict with auth type and user/key info.
+    """
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Valid API key (X-API-Key header) or authentication token required",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    # Try API Key first (for programmatic access)
+    if api_key:
+        key_record = db.query(APIKeyRecord).filter(
+            APIKeyRecord.key == api_key,
+            APIKeyRecord.is_active == True
+        ).first()
+        if key_record:
+            # Update last_used timestamp
+            key_record.last_used = datetime.utcnow()
+            db.commit()
+            return {"type": "api_key", "key": key_record}
+    
+    # Try JWT token (for web portal)
+    if token:
+        username = verify_token(token)
+        if username:
+            user = db.query(UserRecord).filter(
+                UserRecord.username == username,
+                UserRecord.is_active == True
+            ).first()
+            if user:
+                return {"type": "user", "user": user}
+    
+    raise credentials_exception
+
+
+async def get_current_active_user(current_auth: dict = Depends(get_current_user)) -> dict:
+    """Ensure the user is active (for user-based auth)"""
+    if current_auth["type"] == "user":
+        if not current_auth["user"].is_active:
+            raise HTTPException(status_code=400, detail="Inactive user")
+    return current_auth
+
+
+def require_role(required_role: str):
+    """Dependency to require a specific role for user auth"""
+    async def role_checker(current_auth: dict = Depends(get_current_active_user)):
+        if current_auth["type"] == "api_key":
+            # API keys have full access
+            return current_auth
+        if current_auth["type"] == "user":
+            user_role = current_auth["user"].role
+            if user_role != required_role and user_role != "admin":
+                raise HTTPException(status_code=403, detail="Not enough permissions")
+        return current_auth
+    return role_checker
 
 # --- Metrics Cache & Logstreamer ---
 active_metrics_cache = {}
@@ -106,6 +226,7 @@ def background_metrics_worker():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global cresco_client, stunnel_manager, logstreamer_instance, metrics_worker_running
+    global AUTH_SECRET_KEY, AUTH_ALGORITHM, AUTH_ACCESS_TOKEN_EXPIRE_MINUTES
     
     # 1. Read config
     config = configparser.ConfigParser()
@@ -130,6 +251,17 @@ async def lifespan(app: FastAPI):
         proxy_agent = ""
         proxy_host = "localhost"
     
+    # Load auth configuration
+    try:
+        AUTH_SECRET_KEY = config.get('auth', 'secret_key')
+        AUTH_ALGORITHM = config.get('auth', 'algorithm', fallback='HS256')
+        AUTH_ACCESS_TOKEN_EXPIRE_MINUTES = config.getint('auth', 'access_token_expire_minutes', fallback=30)
+        logger.info("Authentication configuration loaded successfully.")
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        # Generate a random secret key if not provided (for development)
+        AUTH_SECRET_KEY = secrets.token_urlsafe(32)
+        logger.warning("config.ini missing 'auth' section. Using generated secret key (not suitable for production!).")
+    
     # 2. Connect to Cresco
     cresco_client = clientlib(host, port, service_key)
     logger.info(f"Connecting to Cresco Server at {host}:{port}...")
@@ -149,6 +281,25 @@ async def lifespan(app: FastAPI):
                 logger.error("Failed to connect to the database after 5 attempts.")
                 raise
     
+    # Create default admin user if no users exist (after tables are created)
+    db = SessionLocal()
+    try:
+        user_count = db.query(UserRecord).count()
+        if user_count == 0:
+            default_admin = UserRecord(
+                username="admin",
+                hashed_password=UserRecord.hash_password("admin"),
+                is_active=True,
+                role="admin"
+            )
+            db.add(default_admin)
+            db.commit()
+            logger.info("Created default admin user (username: admin, password: admin). CHANGE THIS IMMEDIATELY!")
+    except Exception as e:
+        logger.error(f"Error creating default admin user: {e}")
+    finally:
+        db.close()
+
     if cresco_client.connect():
         logger.info("Successfully connected to Cresco Server.")
         # 3. Initialize StunnelManager
@@ -196,11 +347,12 @@ app = FastAPI(
 from fastapi.middleware.cors import CORSMiddleware
 
 # Configure CORS explicitly for the web frontend and common local hosts.
-# Using an explicit list avoids potential issues with credentials and '*'.
+# Note: allow_credentials=True requires specific origins (not "*")
+# CORS_ORIGINS is loaded from config.ini in lifespan, defaults are set above
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=CORS_ORIGINS,  # Loaded from config.ini [cors] allow_origins
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -323,6 +475,213 @@ class LoadBalancedTunnelRequest(BaseModel):
     dst_agent: str
     destinations: list[str]
     buffer_size: str = "1024"
+
+# --- Auth Pydantic Models ---
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    is_active: bool
+    role: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class APIKeyCreate(BaseModel):
+    name: str
+
+class APIKeyResponse(BaseModel):
+    id: int
+    key: str
+    name: str
+    is_active: bool
+    created_at: datetime
+    last_used: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+# --- Authentication Endpoints ---
+from fastapi.security import OAuth2PasswordRequestForm
+
+@app.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """Login endpoint for web portal users to obtain JWT token"""
+    user = db.query(UserRecord).filter(UserRecord.username == form_data.username).first()
+    if not user or not user.verify_password(form_data.password):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    
+    access_token = create_access_token(data={"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/users/me", response_model=UserResponse)
+async def read_users_me(current_auth: dict = Depends(get_current_active_user)):
+    """Get current user info (for web portal)"""
+    if current_auth["type"] == "api_key":
+        raise HTTPException(status_code=400, detail="This endpoint requires user authentication")
+    return current_auth["user"]
+
+
+@app.post("/users", response_model=UserResponse)
+async def create_user(
+    user_data: UserCreate,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(require_role("admin"))
+):
+    """Create a new user (admin only)"""
+    # Check if username exists
+    existing = db.query(UserRecord).filter(UserRecord.username == user_data.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    new_user = UserRecord(
+        username=user_data.username,
+        hashed_password=UserRecord.hash_password(user_data.password),
+        is_active=True,
+        role=user_data.role
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+@app.get("/users", response_model=list[UserResponse])
+async def list_users(
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(require_role("admin"))
+):
+    """List all users (admin only)"""
+    return db.query(UserRecord).all()
+
+
+@app.put("/users/{user_id}/deactivate")
+async def deactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(require_role("admin"))
+):
+    """Deactivate a user (admin only)"""
+    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.is_active = False
+    db.commit()
+    return {"message": f"User {user.username} deactivated"}
+
+
+class PasswordChange(BaseModel):
+    new_password: str
+
+
+@app.put("/users/{user_id}/password")
+async def change_user_password(
+    user_id: int,
+    password_data: PasswordChange,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
+    """
+    Change a user's password.
+    - Admins can change any user's password
+    - Regular users can only change their own password
+    """
+    # Check permissions
+    if current_auth["type"] == "user":
+        current_user = current_auth["user"]
+        if current_user.role != "admin" and current_user.id != user_id:
+            raise HTTPException(status_code=403, detail="You can only change your own password")
+    elif current_auth["type"] == "api_key":
+        # API keys can only change passwords if they have admin access
+        raise HTTPException(status_code=403, detail="API keys cannot change user passwords")
+    
+    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.hashed_password = UserRecord.hash_password(password_data.new_password)
+    db.commit()
+    return {"message": f"Password updated for user {user.username}"}
+
+
+# --- API Key Management Endpoints ---
+@app.post("/api-keys", response_model=APIKeyResponse)
+async def create_api_key(
+    key_data: APIKeyCreate,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
+    """Create a new API key"""
+    new_key = APIKeyRecord(
+        key=secrets.token_urlsafe(32),
+        name=key_data.name,
+        is_active=True,
+        created_by=current_auth["user"].id if current_auth["type"] == "user" else None
+    )
+    db.add(new_key)
+    db.commit()
+    db.refresh(new_key)
+    return new_key
+
+
+@app.get("/api-keys", response_model=list[APIKeyResponse])
+async def list_api_keys(
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
+    """List all API keys"""
+    return db.query(APIKeyRecord).all()
+
+
+@app.delete("/api-keys/{key_id}")
+async def delete_api_key(
+    key_id: int,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
+    """Delete an API key"""
+    key = db.query(APIKeyRecord).filter(APIKeyRecord.id == key_id).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="API key not found")
+    db.delete(key)
+    db.commit()
+    return {"message": "API key deleted"}
+
+
+@app.put("/api-keys/{key_id}/deactivate")
+async def deactivate_api_key(
+    key_id: int,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
+    """Deactivate an API key"""
+    key = db.query(APIKeyRecord).filter(APIKeyRecord.id == key_id).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="API key not found")
+    key.is_active = False
+    db.commit()
+    return {"message": "API key deactivated"}
+
+
 # --- Endpoints ---
 
 @app.get("/")
@@ -330,9 +689,14 @@ def read_root():
     return {"message": "Welcome to the Cresco Tunnel Manager API. Visit /docs for documentation."}
 
 @app.post("/tunnels")
-def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
+def create_tunnel(
+    req: TunnelCreateRequest, 
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
     """
     Launch a new direct tunnel between a source node and a destination node.
+    Requires authentication (API Key or JWT token).
     """
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
@@ -378,9 +742,14 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     }
 
 @app.post("/tunnels-proxy")
-def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db)):
+def create_tunnel_proxy(
+    req: TunnelCreateRequest, 
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
     """
     Launch a new tunnel between a source node and a destination node.
+    Requires authentication (API Key or JWT token).
     """
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized (Check Cresco connection).")
@@ -469,10 +838,15 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     }
 
 @app.post("/tunnels-load-balanced")
-def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = Depends(get_db)):
+def create_tunnel_load_balanced(
+    req: LoadBalancedTunnelRequest, 
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
+):
     """
     Launch two tunnels to a destination and configure HAProxy locally to round-robin between them.
     req.src_port will be what HAProxy binds to locally.
+    Requires authentication (API Key or JWT token).
     """
     if not stunnel_manager or not cresco_client:
          raise HTTPException(status_code=500, detail="Stunnel manager or Cresco client not initialized.")
@@ -633,11 +1007,13 @@ def get_tunnels(
     src_port: Optional[str] = Query(None, description="The source port to filter by"),
     dst_host: Optional[str] = Query(None, description="The destination host to filter by"),
     dst_port: Optional[str] = Query(None, description="The destination port to filter by"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
 ):
     """
     Retrieve a list of database tunnels.
     Provide optional query parameters to filter the results.
+    Requires authentication (API Key or JWT token).
     """
     return build_tunnels_response(
         db, src_region, src_agent, src_plugin_id, dst_region, dst_agent,
@@ -701,11 +1077,13 @@ def get_tunnel_config(
 @app.delete("/tunnels/{stunnel_id}")
 def delete_tunnel(
     stunnel_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(get_current_active_user)
 ):
     """
     Remove a tunnel from the Cresco global controller and database by its ID.
     Note: The stunnel_id here must correspond to the pipeline ID assigned by Cresco.
+    Requires authentication (API Key or JWT token).
     """
     logger.info(f"--- ENTERING delete_tunnel(stunnel_id='{stunnel_id}') ---")
     if not cresco_client:
@@ -750,9 +1128,10 @@ def delete_tunnel(
 
 
 @app.post("/agents/{region}/{agent}/restart")
-def restart_agent(region: str, agent: str):
+def restart_agent(region: str, agent: str, current_auth: dict = Depends(get_current_active_user)):
     """
     Restart the Cresco framework on a specific agent.
+    Requires authentication (API Key or JWT token).
     """
     if not cresco_client:
         raise HTTPException(status_code=500, detail="Cresco client not connected.")
@@ -766,9 +1145,10 @@ def restart_agent(region: str, agent: str):
         raise HTTPException(status_code=500, detail=f"Failed to restart agent: {str(e)}")
 
 @app.post("/agents/{region}/{agent}/stop")
-def stop_agent(region: str, agent: str):
+def stop_agent(region: str, agent: str, current_auth: dict = Depends(get_current_active_user)):
     """
     Stop the Cresco controller on a specific agent.
+    Requires authentication (API Key or JWT token).
     """
     if not cresco_client:
         raise HTTPException(status_code=500, detail="Cresco client not connected.")
@@ -782,9 +1162,10 @@ def stop_agent(region: str, agent: str):
         raise HTTPException(status_code=500, detail=f"Failed to stop agent: {str(e)}")
 
 @app.get("/agents")
-def get_agents():
+def get_agents(current_auth: dict = Depends(get_current_active_user)):
     """
     Retrieve a list of agents from the Cresco global controller.
+    Requires authentication (API Key or JWT token).
     """
     if not cresco_client:
         raise HTTPException(status_code=500, detail="Cresco client not connected.")

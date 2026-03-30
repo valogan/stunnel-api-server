@@ -1,5 +1,9 @@
 document.addEventListener('DOMContentLoaded', () => {
     console.log('agent-discovery.js loaded');
+    
+    // Check authentication first
+    if (!checkAuth()) return;
+
     // Determine default API URL
     const defaultApiUrl = `http://${window.location.hostname}:8005`;
     let API_URL = localStorage.getItem('crescoApiUrl') || defaultApiUrl;
@@ -221,7 +225,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
                 method: 'DELETE',
+                headers: getAuthHeaders()
             });
+
+            if (handleAuthError(response)) return;
 
             if (!response.ok) {
                 const data = await response.json();
@@ -241,7 +248,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             showLoading(true);
             // Request detailed tunnel information including port and direction data
-            const response = await fetch(`${API_URL}/agents/with-stunnel-plugins?detailed=true`);
+            const response = await fetch(`${API_URL}/agents/with-stunnel-plugins?detailed=true`, {
+                headers: getAuthHeaders()
+            });
+            if (handleAuthError(response)) return;
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
@@ -814,12 +824,11 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const response = await fetch(`${API_URL}/tunnels`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify(payload)
                 });
+
+                if (handleAuthError(response)) return;
 
                 const data = await response.json();
 
