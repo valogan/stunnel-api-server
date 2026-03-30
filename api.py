@@ -589,6 +589,27 @@ async def deactivate_user(
     return {"message": f"User {user.username} deactivated"}
 
 
+@app.delete("/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_auth: dict = Depends(require_role("admin"))
+):
+    """Delete a user (admin only)"""
+    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Prevent deleting yourself
+    if current_auth["type"] == "user" and current_auth["user"].id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    
+    username = user.username
+    db.delete(user)
+    db.commit()
+    return {"message": f"User {username} deleted"}
+
+
 class PasswordChange(BaseModel):
     new_password: str
 

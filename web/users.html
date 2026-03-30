@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Management - Cresco Tunnel Manager</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        .users-container {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .users-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+        .users-header h2 {
+            margin: 0;
+        }
+        .user-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .user-table th, .user-table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .user-table th {
+            font-weight: 600;
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .user-table tr:hover {
+            background: var(--hover-bg);
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        .badge-admin {
+            background: rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+        }
+        .badge-user {
+            background: rgba(107, 114, 128, 0.2);
+            color: #6b7280;
+        }
+        .badge-active {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }
+        .badge-inactive {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+        .btn-sm {
+            padding: 0.375rem 0.75rem;
+            font-size: 0.875rem;
+        }
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            width: 100%;
+            max-width: 400px;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        .modal-header h3 {
+            margin: 0;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: var(--text-muted);
+        }
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 1rem;
+            background: var(--input-bg);
+            color: var(--text-color);
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+        .api-keys-section {
+            margin-top: 2rem;
+        }
+        .api-key-value {
+            font-family: monospace;
+            background: var(--hover-bg);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.875rem;
+        }
+        .access-denied {
+            text-align: center;
+            padding: 3rem;
+        }
+        .access-denied h2 {
+            color: #ef4444;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Cresco Tunnel Manager</h1>
+            <p>Manage users and API keys</p>
+            <nav class="header-nav">
+                <a href="index.html" class="nav-link">Home</a>
+                <a href="load-balanced.html" class="nav-link">Load Balanced</a>
+                <a href="agents.html" class="nav-link">Agents</a>
+                <a href="graph.html" class="nav-link">Graph View</a>
+                <a href="agent-discovery.html" class="nav-link">Agent Discovery</a>
+                <a href="users.html" class="nav-link active">Users</a>
+                <a href="#" class="nav-link" id="logoutBtn" style="float: right;">Logout</a>
+            </nav>
+        </header>
+
+        <main>
+            <div id="accessDenied" class="access-denied hidden">
+                <h2>Access Denied</h2>
+                <p>You must be an admin to view this page.</p>
+                <a href="index.html" class="btn btn-primary">Go to Dashboard</a>
+            </div>
+
+            <div id="usersContent">
+                <!-- Users Section -->
+                <div class="users-container">
+                    <div class="users-header">
+                        <h2>Users</h2>
+                        <button class="btn btn-primary" id="addUserBtn">+ Add User</button>
+                    </div>
+                    <table class="user-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Username</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTableBody">
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- API Keys Section -->
+                <div class="users-container api-keys-section">
+                    <div class="users-header">
+                        <h2>API Keys</h2>
+                        <button class="btn btn-primary" id="addApiKeyBtn">+ Create API Key</button>
+                    </div>
+                    <table class="user-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Name</th>
+                                <th>Key</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Last Used</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="apiKeysTableBody">
+                            <tr>
+                                <td colspan="7" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Add User Modal -->
+    <div class="modal" id="addUserModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add New User</h3>
+                <button class="close-btn" onclick="closeModal('addUserModal')">&times;</button>
+            </div>
+            <form id="addUserForm">
+                <div class="form-group">
+                    <label for="newUsername">Username</label>
+                    <input type="text" id="newUsername" required>
+                </div>
+                <div class="form-group">
+                    <label for="newPassword">Password</label>
+                    <input type="password" id="newPassword" required>
+                </div>
+                <div class="form-group">
+                    <label for="newRole">Role</label>
+                    <select id="newRole">
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%;">Create User</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Add API Key Modal -->
+    <div class="modal" id="addApiKeyModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Create API Key</h3>
+                <button class="close-btn" onclick="closeModal('addApiKeyModal')">&times;</button>
+            </div>
+            <form id="addApiKeyForm">
+                <div class="form-group">
+                    <label for="apiKeyName">Key Name</label>
+                    <input type="text" id="apiKeyName" placeholder="e.g., CI Pipeline Key" required>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%;">Create Key</button>
+            </form>
+            <div id="newKeyDisplay" class="hidden" style="margin-top: 1rem; padding: 1rem; background: var(--hover-bg); border-radius: 6px;">
+                <p><strong>Your new API key:</strong></p>
+                <code id="newKeyValue" style="word-break: break-all;"></code>
+                <p style="color: #ef4444; font-size: 0.875rem; margin-top: 0.5rem;">⚠️ Copy this key now! It won't be shown again.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Password Modal -->
+    <div class="modal" id="changePasswordModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Change Password</h3>
+                <button class="close-btn" onclick="closeModal('changePasswordModal')">&times;</button>
+            </div>
+            <form id="changePasswordForm">
+                <div class="form-group">
+                    <label for="passwordUsername">Username</label>
+                    <input type="text" id="passwordUsername" readonly>
+                </div>
+                <div class="form-group">
+                    <label for="newPasswordInput">New Password</label>
+                    <input type="password" id="newPasswordInput" required minlength="4">
+                </div>
+                <div class="form-group">
+                    <label for="confirmPasswordInput">Confirm Password</label>
+                    <input type="password" id="confirmPasswordInput" required minlength="4">
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%;">Update Password</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="auth.js"></script>
+    <script src="users.js"></script>
+    <script>
+        // Add logout functionality
+        document.getElementById('logoutBtn').addEventListener('click', (e) => {
+            e.preventDefault();
+            logout();
+        });
+    </script>
+</body>
+
+</html>

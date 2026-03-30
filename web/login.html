@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Cresco Tunnel Manager</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        .login-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 80vh;
+        }
+        .login-card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 2rem;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .login-card h2 {
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+        .login-form .form-group {
+            margin-bottom: 1rem;
+        }
+        .login-form label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        .login-form input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 1rem;
+            background: var(--input-bg);
+            color: var(--text-color);
+        }
+        .login-form input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+        .login-btn {
+            width: 100%;
+            padding: 0.75rem;
+            margin-top: 1rem;
+        }
+        .error-message {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.1);
+            padding: 0.75rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            display: none;
+        }
+        .api-key-section {
+            margin-top: 2rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border-color);
+        }
+        .api-key-section p {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Cresco Tunnel Manager</h1>
+            <p>Authentication Required</p>
+        </header>
+
+        <main>
+            <div class="login-container">
+                <div class="login-card">
+                    <h2>Login</h2>
+                    
+                    <div id="errorMessage" class="error-message"></div>
+                    
+                    <form id="loginForm" class="login-form">
+                        <div class="form-group">
+                            <label for="username">Username</label>
+                            <input type="text" id="username" name="username" required autocomplete="username" placeholder="Enter your username">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="password">Password</label>
+                            <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter your password">
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary login-btn" id="loginBtn">
+                            <span class="btn-text">Sign In</span>
+                            <div class="loader hidden"></div>
+                        </button>
+                    </form>
+                    
+                    <div class="api-key-section">
+                        <p><strong>Programmatic Access:</strong> Use the <code>X-API-Key</code> header with your API key for direct API access.</p>
+                        <p>Example: <code>curl -H "X-API-Key: your-key" http://localhost:8000/tunnels</code></p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const API_URL = localStorage.getItem('crescoApiUrl') || '/api';
+            const loginForm = document.getElementById('loginForm');
+            const loginBtn = document.getElementById('loginBtn');
+            const errorMessage = document.getElementById('errorMessage');
+            
+            // Check if already logged in
+            const token = localStorage.getItem('access_token');
+            if (token) {
+                // Verify token is still valid
+                fetch(`${API_URL}/users/me`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+                .then(response => {
+                    if (response.ok) {
+                        // Token is valid, redirect to home
+                        window.location.href = 'index.html';
+                    }
+                })
+                .catch(() => {
+                    // Token invalid, clear it
+                    localStorage.removeItem('access_token');
+                });
+            }
+            
+            loginForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                
+                // Hide previous error
+                errorMessage.style.display = 'none';
+                
+                // Loading state
+                loginBtn.disabled = true;
+                loginBtn.querySelector('.loader').classList.remove('hidden');
+                loginBtn.querySelector('.btn-text').textContent = 'Signing in...';
+                
+                try {
+                    // OAuth2PasswordRequestForm expects form data, not JSON
+                    const formData = new URLSearchParams();
+                    formData.append('username', username);
+                    formData.append('password', password);
+                    
+                    const response = await fetch(`${API_URL}/token`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        },
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (!response.ok) {
+                        throw new Error(data.detail || 'Login failed');
+                    }
+                    
+                    // Store token
+                    localStorage.setItem('access_token', data.access_token);
+                    localStorage.setItem('token_type', data.token_type);
+                    
+                    // Redirect to home
+                    window.location.href = 'index.html';
+                    
+                } catch (error) {
+                    console.error('Login error:', error);
+                    errorMessage.textContent = error.message;
+                    errorMessage.style.display = 'block';
+                } finally {
+                    // Reset button
+                    loginBtn.disabled = false;
+                    loginBtn.querySelector('.loader').classList.add('hidden');
+                    loginBtn.querySelector('.btn-text').textContent = 'Sign In';
+                }
+            });
+        });
+    </script>
+</body>
+
+</html>
