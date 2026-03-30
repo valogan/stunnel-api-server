@@ -7,9 +7,10 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse, HTMLResponse
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from fastapi import Depends, Security
+from fastapi.staticfiles import StaticFiles
 import time
 import uuid
 import asyncio
@@ -1298,6 +1299,72 @@ def get_agents_with_stunnel_plugins(detailed: bool = Query(False, description="I
     except Exception as e:
         logger.error(f"Failed to fetch agents with stunnel plugins: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch agents with stunnel plugins: {str(e)}")
+
+
+# --- Serve Web Frontend ---
+# Mount static files (CSS, JS) from web/ directory
+import os
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    """Serve the main index page"""
+    index_path = os.path.join(WEB_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return HTMLResponse(content="<h1>Web frontend not found</h1><p>Looking for: " + index_path + "</p>", status_code=404)
+
+@app.get("/login.html", response_class=HTMLResponse)
+async def serve_login():
+    """Serve the login page"""
+    login_path = os.path.join(WEB_DIR, "login.html")
+    if os.path.exists(login_path):
+        return FileResponse(login_path)
+    return HTMLResponse(content="<h1>Login page not found</h1>", status_code=404)
+
+@app.get("/{page_name}.html", response_class=HTMLResponse)
+async def serve_html_page(page_name: str):
+    """Serve HTML pages from web/ directory"""
+    page_path = os.path.join(WEB_DIR, f"{page_name}.html")
+    if os.path.exists(page_path):
+        return FileResponse(page_path)
+    return HTMLResponse(content=f"<h1>Page {page_name}.html not found</h1>", status_code=404)
+
+@app.get("/js/{file_path:path}")
+async def serve_js(file_path: str):
+    """Serve JavaScript files from web/ directory"""
+    js_path = os.path.join(WEB_DIR, "js", file_path)
+    if os.path.exists(js_path):
+        return FileResponse(js_path)
+    # Try web/ directly for files like web/app.js
+    alt_path = os.path.join(WEB_DIR, file_path)
+    if os.path.exists(alt_path):
+        return FileResponse(alt_path)
+    return Response(content=f"File not found: {file_path}", status_code=404)
+
+@app.get("/css/{file_path:path}")
+async def serve_css(file_path: str):
+    """Serve CSS files from web/ directory"""
+    css_path = os.path.join(WEB_DIR, "css", file_path)
+    if os.path.exists(css_path):
+        return FileResponse(css_path)
+    return Response(content=f"File not found: {file_path}", status_code=404)
+
+@app.get("/{filename}.js")
+async def serve_js_file(filename: str):
+    """Serve JavaScript files from web/ directory (e.g., app.js, auth.js)"""
+    js_path = os.path.join(WEB_DIR, f"{filename}.js")
+    if os.path.exists(js_path):
+        return FileResponse(js_path, media_type="application/javascript")
+    return Response(content=f"File not found: {filename}.js", status_code=404)
+
+@app.get("/{filename}.css")
+async def serve_css_file(filename: str):
+    """Serve CSS files from web/ directory"""
+    css_path = os.path.join(WEB_DIR, f"{filename}.css")
+    if os.path.exists(css_path):
+        return FileResponse(css_path, media_type="text/css")
+    return Response(content=f"File not found: {filename}.css", status_code=404)
 
 
 if __name__ == "__main__":
