@@ -68,18 +68,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function drawGraph(agents, tunnels) {
+    function drawGraph(agents, tunnels, liveTunnels = []) {
         const nodesData = new Map();
         const edgesData = [];
         currentNodesMap.clear();
 
         // 1. Add all Agents as nodes
         agents.forEach(a => {
-            currentNodesMap.set(a.agent_id, { region: a.region_id, agent: a.agent_id });
-            nodesData.set(a.agent_id, {
-                id: a.agent_id,
-                label: a.agent_id,
-                group: a.region_id
+            // Handle both agent_id/region_id and agent/region field names
+            const agentId = a.agent_id || a.agent;
+            const regionId = a.region_id || a.region;
+            currentNodesMap.set(agentId, { region: regionId, agent: agentId });
+            nodesData.set(agentId, {
+                id: agentId,
+                label: agentId,
+                group: regionId
             });
         });
 
@@ -130,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Edge
             edgesData.push({
-                id: t.stunnel_id, 
+                id: t.stunnel_id,
                 from: t.src_agent,
                 to: t.dst_agent,
                 label: `${t.src_port} \u2192 ${t.dst_port}`,
@@ -141,9 +144,106 @@ document.addEventListener('DOMContentLoaded', () => {
                 width: edgeStyle.width,
                 font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' },
                 metrics_health: t.metrics ? t.metrics.health : "unknown",
-                smooth: { type: 'dynamic' } // Allow multiple edges to curve dynamically without overlapping
+                smooth: { type: 'dynamic' }, // Allow multiple edges to curve dynamically without overlapping
+                // Store tunnel info for deletion
+                src_region: t.src_region,
+                src_agent: t.src_agent,
+                src_plugin: t.src_plugin || t.stunnel_plugin_id,
+                dst_region: t.dst_region,
+                dst_agent: t.dst_agent,
+                dst_plugin: t.dst_plugin
             });
         });
+
+        // 3. Add Live Tunnels from Cresco stunnel plugins as additional edges
+        if (liveTunnels && liveTunnels.length > 0) {
+            console.log(`Processing ${liveTunnels.length} live tunnels`);
+            liveTunnels.forEach(lt => {
+                if (!lt || typeof lt !== 'object') return;
+                
+                // Extract tunnel info - structure depends on stunnel plugin response
+                const tunnelId = lt.stunnel_id || lt.id || lt.tunnel_id;
+                const srcPort = lt.src_port || lt.source_port || lt.local_port || '';
+                const dstPort = lt.dst_port || lt.dest_port || lt.remote_port || '';
+                const dstHost = lt.dst_host || lt.dest_host || lt.remote_host || '';
+                
+                // Get source agent info from the config (src_agent is the actual source)
+                // Fall back to _src_agent if src_agent not in config
+                const srcAgent = lt.src_agent || lt._src_agent;
+                const srcRegion = lt.src_region || lt._src_region;
+                
+                // For destination, try to extract from tunnel config or use placeholder
+                let dstAgent = lt.dst_agent || lt.dest_agent || '';
+                let dstRegion = lt.dst_region || lt.dest_region || srcRegion;
+                
+                if (!tunnelId || !srcAgent) {
+                    console.log('Skipping tunnel - missing tunnelId or srcAgent:', lt);
+                    return; // Skip if we don't have essential info
+                }
+                
+                // If we don't have destination agent, create a placeholder based on dst_host
+                // If no dst_host either, use a generic "unknown-destination" placeholder
+                if (!dstAgent) {
+                    dstAgent = dstHost || `dest-${tunnelId.substring(0, 8)}`;
+                    dstRegion = dstRegion || srcRegion;
+                    console.log(`Created placeholder destination for tunnel ${tunnelId}: ${dstAgent}`);
+                }
+                
+                // Add source node if not exists
+                if (!nodesData.has(srcAgent)) {
+                    currentNodesMap.set(srcAgent, { region: srcRegion, agent: srcAgent });
+                    nodesData.set(srcAgent, {
+                        id: srcAgent, label: srcAgent, group: srcRegion
+                    });
+                }
+                
+                // Add destination node if not exists
+                if (!nodesData.has(dstAgent)) {
+                    currentNodesMap.set(dstAgent, { region: dstRegion, agent: dstAgent });
+                    nodesData.set(dstAgent, {
+                        id: dstAgent, label: dstAgent, group: dstRegion
+                    });
+                }
+                
+                // Check if this edge already exists from database tunnels
+                const existingEdge = edgesData.find(e => e.id === tunnelId);
+                if (existingEdge) {
+                    // Update existing edge with live info
+                    existingEdge.is_live = true;
+                    return;
+                }
+                
+                // Create edge for live tunnel not in database - use same styling as database tunnels
+                const label = srcPort && dstPort ? `${srcPort} → ${dstPort}` : tunnelId.substring(0, 8);
+                const tooltip = `Tunnel ID: ${tunnelId}\nSrc: ${srcAgent}:${srcPort || 'N/A'}\nDst: ${dstHost || dstAgent}:${dstPort || 'N/A'}\nStatus: ${lt.status || 'active'}`;
+                
+                // Use the same edge style function as database tunnels
+                const edgeStyle = getEdgeStyle({ health: 'unknown' });
+                
+                edgesData.push({
+                    id: tunnelId,
+                    from: srcAgent,
+                    to: dstAgent,
+                    label: label,
+                    title: tooltip,
+                    stunnel_id: tunnelId,
+                    arrows: 'to',
+                    color: edgeStyle.color,
+                    width: edgeStyle.width,
+                    font: { color: '#94a3b8', strokeWidth: 0, align: 'horizontal' },
+                    metrics_health: 'unknown',
+                    is_live: true,
+                    smooth: { type: 'dynamic' },
+                    // Store tunnel info for deletion
+                    src_region: srcRegion,
+                    src_agent: srcAgent,
+                    src_plugin: lt.src_plugin,
+                    dst_region: dstRegion,
+                    dst_agent: dstAgent,
+                    dst_plugin: lt.dst_plugin
+                });
+            });
+        }
 
         const nodes = Array.from(nodesData.values()).map(node => ({
             ...node, shape: 'dot', size: 20, font: { color: '#f8fafc', size: 14 },
@@ -223,7 +323,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     if (edge && edge.stunnel_id) {
                         if (confirm(`Do you want to delete tunnel ${edge.stunnel_id}?`)) {
-                            await deleteTunnelFromGraph(edge.stunnel_id);
+                            await deleteTunnelFromGraph(
+                                edge.stunnel_id,
+                                edge.src_region,
+                                edge.src_agent,
+                                edge.src_plugin,
+                                edge.dst_region,
+                                edge.dst_agent,
+                                edge.dst_plugin
+                            );
                         }
                     }
                 }
@@ -232,9 +340,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function deleteTunnelFromGraph(tunnelId) {
+    async function deleteTunnelFromGraph(tunnelId, srcRegion, srcAgent, srcPlugin, dstRegion, dstAgent, dstPlugin) {
         try {
-            const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
+            // Build query string with optional parameters
+            const params = new URLSearchParams();
+            if (srcRegion) params.append('src_region', srcRegion);
+            if (srcAgent) params.append('src_agent', srcAgent);
+            if (srcPlugin) params.append('src_plugin', srcPlugin);
+            if (dstRegion) params.append('dst_region', dstRegion);
+            if (dstAgent) params.append('dst_agent', dstAgent);
+            if (dstPlugin) params.append('dst_plugin', dstPlugin);
+            
+            const queryString = params.toString();
+            const url = `${API_URL}/tunnels/${tunnelId}${queryString ? '?' + queryString : ''}`;
+            
+            const response = await fetch(url, {
                 method: 'DELETE',
             });
 
@@ -342,7 +462,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Set up WebSocket for realtime tunnel metrics
+    // Set up WebSocket for realtime tunnel metrics and live agents
     let ws = null;
     function connectWebSocket() {
         if (ws) {
@@ -363,10 +483,18 @@ document.addEventListener('DOMContentLoaded', () => {
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                const tunnels = data.database_tunnels || [];
-                // Redraw graph dynamically with the latest realtime metrics
-                if (currentAgents.length > 0) {
-                    drawGraph(currentAgents, tunnels);
+                // Use database tunnels as base
+                let tunnels = data.database_tunnels || [];
+                // Also include live tunnels from Cresco if available
+                const liveTunnels = data.live_tunnels || [];
+                
+                // Use live agents from WebSocket if available, otherwise fall back to cached
+                const agents = data.agents || currentAgents;
+                if (agents && agents.length > 0) {
+                    currentAgents = agents; // Update cache
+                    drawGraph(agents, tunnels, liveTunnels);
+                } else if (currentAgents.length > 0) {
+                    drawGraph(currentAgents, tunnels, liveTunnels);
                 }
             } catch (err) {
                 console.error("Error parsing WS message", err);

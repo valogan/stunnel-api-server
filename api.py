@@ -241,8 +241,13 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plugin_id=None, dst_region=None, dst_agent=None, src_port=None, dst_host=None, dst_port=None):
-    """Helper to build the tunnels response block for both REST and WS"""
+def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plugin_id=None, dst_region=None, dst_agent=None, src_port=None, dst_host=None, dst_port=None, include_agents=False):
+    """Helper to build the tunnels response block for both REST and WS
+    
+    Args:
+        include_agents: If True, also include live agents from Cresco global controller
+                       and live tunnels from all stunnel plugins
+    """
     query = db.query(TunnelRecord)
     if src_region: query = query.filter(TunnelRecord.src_region == src_region)
     if src_agent: query = query.filter(TunnelRecord.src_agent == src_agent)
@@ -284,10 +289,72 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
         except Exception:
             pass
 
-    return {
+    response = {
         "database_tunnels": tunnels_data,
         "live_cresco_tunnels": cresco_tunnels
     }
+    
+    # Include live agents and live tunnels from Cresco global controller if requested
+    if include_agents and cresco_client:
+        try:
+            agents = cresco_client.globalcontroller.get_agent_list()
+            response["agents"] = agents
+            
+            # Also gather live tunnels from all stunnel plugins across all agents
+            # Use a dict to deduplicate by stunnel_id (each plugin knows about all tunnels)
+            live_tunnels_map = {}
+            if stunnel_manager and agents:
+                for agent_info in agents:
+                    agent_region = agent_info.get('region') or agent_info.get('region_id')
+                    agent_id = agent_info.get('agent') or agent_info.get('agent_id')
+                    
+                    if agent_region and agent_id:
+                        try:
+                            # Find stunnel plugin on this agent
+                            plugin_id = stunnel_manager.find_existing_stunnel_plugin(agent_region, agent_id)
+                            if plugin_id:
+                                live_tunnels = stunnel_manager.get_tunnel_list(
+                                    src_region=agent_region,
+                                    src_agent=agent_id,
+                                    src_plugin_id=plugin_id
+                                )
+                                if live_tunnels:
+                                    # Process each tunnel to get full config
+                                    for tunnel in live_tunnels:
+                                        if isinstance(tunnel, dict):
+                                            tunnel_id = tunnel.get('stunnel_id')
+                                            if tunnel_id and tunnel_id not in live_tunnels_map:
+                                                # Fetch full tunnel config to get dst_agent, ports, etc.
+                                                try:
+                                                    config = stunnel_manager.get_tunnel_config(
+                                                        src_region=agent_region,
+                                                        src_agent=agent_id,
+                                                        src_plugin_id=plugin_id,
+                                                        stunnel_id=tunnel_id
+                                                    )
+                                                    if config:
+                                                        logger.info(f"Tunnel {tunnel_id} config: {config}")
+                                                        # Merge ALL config fields into tunnel info
+                                                        for key, value in config.items():
+                                                            if value is not None:
+                                                                tunnel[key] = value
+                                                    else:
+                                                        logger.info(f"No config returned for tunnel {tunnel_id}")
+                                                except Exception as e:
+                                                    logger.warning(f"Could not get config for tunnel {tunnel_id}: {e}")
+                                                
+                                                # Store in dedup map - use src_agent from config as actual source
+                                                live_tunnels_map[tunnel_id] = tunnel
+                        except Exception as e:
+                            logger.debug(f"Could not get tunnels from {agent_region}/{agent_id}: {e}")
+            
+            response["live_tunnels"] = list(live_tunnels_map.values())
+        except Exception as e:
+            logger.error(f"Failed to fetch live agents for response: {e}")
+            response["agents"] = []
+            response["live_tunnels"] = []
+
+    return response
 
 async def websocket_metrics_task():
     """Background task to broadcast metrics continuously"""
@@ -296,7 +363,8 @@ async def websocket_metrics_task():
             if manager.active_connections:
                 db = SessionLocal()
                 try:
-                    data = build_tunnels_response(db)
+                    # Include live agents in WebSocket broadcast for graph view
+                    data = build_tunnels_response(db, include_agents=True)
                     await manager.broadcast(data)
                 finally:
                     db.close()
@@ -633,15 +701,17 @@ def get_tunnels(
     src_port: Optional[str] = Query(None, description="The source port to filter by"),
     dst_host: Optional[str] = Query(None, description="The destination host to filter by"),
     dst_port: Optional[str] = Query(None, description="The destination port to filter by"),
+    include_agents: bool = Query(False, description="If true, include live agents and live tunnels from Cresco"),
     db: Session = Depends(get_db)
 ):
     """
-    Retrieve a list of database tunnels.
+    Retrieve a list of tunnels.
     Provide optional query parameters to filter the results.
+    Set include_agents=true to get live tunnels from Cresco stunnel plugins instead of just database records.
     """
     return build_tunnels_response(
         db, src_region, src_agent, src_plugin_id, dst_region, dst_agent,
-        src_port, dst_host, dst_port
+        src_port, dst_host, dst_port, include_agents=include_agents
     )
 
 @app.get("/tunnels/{stunnel_id}/status")
@@ -701,49 +771,90 @@ def get_tunnel_config(
 @app.delete("/tunnels/{stunnel_id}")
 def delete_tunnel(
     stunnel_id: str,
+    src_region: Optional[str] = Query(None, description="The source region of the tunnel"),
+    src_agent: Optional[str] = Query(None, description="The source agent of the tunnel"),
+    src_plugin: Optional[str] = Query(None, description="The source stunnel plugin ID"),
+    dst_region: Optional[str] = Query(None, description="The destination region of the tunnel"),
+    dst_agent: Optional[str] = Query(None, description="The destination agent of the tunnel"),
+    dst_plugin: Optional[str] = Query(None, description="The destination stunnel plugin ID"),
     db: Session = Depends(get_db)
 ):
     """
-    Remove a tunnel from the Cresco global controller and database by its ID.
-    Note: The stunnel_id here must correspond to the pipeline ID assigned by Cresco.
+    Remove a tunnel by sending removesrctunnel/removedsttunnel actions to the stunnel plugins.
+    For live tunnels, provide src_region, src_agent, src_plugin from the tunnel info.
+    For database tunnels, these will be looked up from the database record.
     """
     logger.info(f"--- ENTERING delete_tunnel(stunnel_id='{stunnel_id}') ---")
-    if not cresco_client:
-         logger.error("Cresco client not connected!")
-         raise HTTPException(status_code=500, detail="Cresco client not connected.")
-         
+    if not stunnel_manager:
+        logger.error("Stunnel manager not initialized!")
+        raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
+    
+    # Try to get tunnel info from database first if not provided
+    db_tunnel = db.query(TunnelRecord).filter(TunnelRecord.stunnel_id == stunnel_id).first()
+    
+    # Use provided params or fall back to database record
+    final_src_region = src_region
+    final_src_agent = src_agent
+    final_src_plugin = src_plugin
+    final_dst_region = dst_region
+    final_dst_agent = dst_agent
+    final_dst_plugin = dst_plugin
+    
+    if db_tunnel:
+        logger.info(f"Found database record for tunnel {stunnel_id}")
+        if not final_src_region:
+            final_src_region = db_tunnel.src_region
+        if not final_src_agent:
+            final_src_agent = db_tunnel.src_agent
+        if not final_src_plugin:
+            final_src_plugin = db_tunnel.stunnel_plugin_id
+        if not final_dst_region:
+            final_dst_region = db_tunnel.dst_region
+        if not final_dst_agent:
+            final_dst_agent = db_tunnel.dst_agent
+        # Note: dst_plugin is not stored in database, would need to be discovered
+    
+    response = {"stunnel_id": stunnel_id, "src_removal": None, "dst_removal": None}
+    
     try:
-        logger.info(f"Calling cresco_client.globalcontroller.remove_pipeline('{stunnel_id}')")
-        response = cresco_client.globalcontroller.remove_pipeline(stunnel_id)
-        logger.info(f"remove_pipeline response: {response}")
+        # Remove source tunnel
+        if final_src_region and final_src_agent and final_src_plugin:
+            logger.info(f"Removing source tunnel from {final_src_region}/{final_src_agent} plugin {final_src_plugin}")
+            src_result = stunnel_manager.remove_src_tunnel(
+                src_region=final_src_region,
+                src_agent=final_src_agent,
+                src_plugin_id=final_src_plugin,
+                stunnel_id=stunnel_id
+            )
+            response["src_removal"] = src_result
+            logger.info(f"Source tunnel removal result: {src_result}")
+        else:
+            logger.warning(f"Missing source info (region/agent/plugin) - cannot remove source tunnel")
         
-        # Optionally remove from database to keep it clean
-        logger.info("Querying local DB for tunnel record...")
-        db_tunnel = db.query(TunnelRecord).filter(
-            (TunnelRecord.stunnel_id == stunnel_id) | 
-            (TunnelRecord.stunnel_plugin_id == stunnel_id)
-        ).first()
+        # Remove destination tunnel (if we have the destination plugin)
+        if final_dst_region and final_dst_agent and final_dst_plugin:
+            logger.info(f"Removing destination tunnel from {final_dst_region}/{final_dst_agent} plugin {final_dst_plugin}")
+            dst_result = stunnel_manager.remove_dst_tunnel(
+                dst_region=final_dst_region,
+                dst_agent=final_dst_agent,
+                dst_plugin_id=final_dst_plugin,
+                stunnel_id=stunnel_id
+            )
+            response["dst_removal"] = dst_result
+            logger.info(f"Destination tunnel removal result: {dst_result}")
+        else:
+            logger.info(f"Destination plugin not provided - skipping destination tunnel removal")
         
+        # Remove from database if exists
         if db_tunnel:
-            logger.info(f"Found record in DB: stunnel_id={db_tunnel.stunnel_id}, plugin_id={db_tunnel.stunnel_plugin_id}. Deleting...")
-            dst_region = db_tunnel.dst_region
-            dst_agent = db_tunnel.dst_agent
+            logger.info(f"Deleting database record for tunnel {stunnel_id}")
             db.delete(db_tunnel)
             db.commit()
-            logger.info("DB record deleted.")
-            
-            # Restart the destination agent as requested
-            try:
-                logger.info(f"Restarting destination agent {dst_region}/{dst_agent}...")
-                cresco_client.admin.restartframework(dst_region, dst_agent)
-                logger.info("Restart command sent.")
-            except Exception as e:
-                logger.error(f"Failed to restart destination agent {dst_region}/{dst_agent}: {e}")
-        else:
-            logger.warning(f"No corresponding record found in local DB for '{stunnel_id}'.")
-            
+            logger.info("Database record deleted.")
+        
         logger.info("--- EXITING delete_tunnel (Success) ---")
-        return {"stunnel_id": stunnel_id, "status": "Request sent", "response": response}
+        return {"stunnel_id": stunnel_id, "status": "Removal request sent", "details": response}
+        
     except Exception as e:
         logger.error(f"Failed to delete tunnel {stunnel_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")

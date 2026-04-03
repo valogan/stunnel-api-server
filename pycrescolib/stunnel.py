@@ -129,8 +129,48 @@ class StunnelDirect:
             if 'tunnel_config' in result:
                 return json.loads(result['tunnel_config'])
         except Exception as e:
-            self.logger.error(f"Error configuring existing tunnel: {e}")
+            self.logger.error(f"Error getting tunnel config: {e}")
             return {}
+
+    def remove_src_tunnel(self, src_region: str, src_agent: str, src_plugin_id: str, stunnel_id: str) -> dict | None:
+        """
+        Remove a source tunnel from the stunnel plugin.
+        Sends 'removesrctunnel' CONFIG action to the stunnel plugin.
+        """
+        try:
+            self.logger.info(f"Removing source tunnel {stunnel_id} from {src_region}/{src_agent}")
+            message_event_type = 'CONFIG'
+            message_payload = {
+                'action': 'removesrctunnel',
+                'action_stunnel_id': stunnel_id
+            }
+
+            result = self.client.messaging.global_plugin_msgevent(True, message_event_type, message_payload, src_region, src_agent, src_plugin_id)
+            self.logger.info(f"Remove source tunnel result: {result}")
+            return result
+        except Exception as e:
+            self.logger.error(f"Error removing source tunnel: {e}")
+            return None
+
+    def remove_dst_tunnel(self, dst_region: str, dst_agent: str, dst_plugin_id: str, stunnel_id: str) -> dict | None:
+        """
+        Remove a destination tunnel from the stunnel plugin.
+        Sends 'removedsttunnel' CONFIG action to the stunnel plugin.
+        """
+        try:
+            self.logger.info(f"Removing destination tunnel {stunnel_id} from {dst_region}/{dst_agent}")
+            message_event_type = 'CONFIG'
+            message_payload = {
+                'action': 'removedsttunnel',
+                'action_stunnel_id': stunnel_id
+            }
+
+            result = self.client.messaging.global_plugin_msgevent(True, message_event_type, message_payload, dst_region, dst_agent, dst_plugin_id)
+            self.logger.info(f"Remove destination tunnel result: {result}")
+            return result
+        except Exception as e:
+            self.logger.error(f"Error removing destination tunnel: {e}")
+            return None
 
 
 class StunnelCADL:
