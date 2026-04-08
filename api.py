@@ -768,6 +768,91 @@ def get_tunnel_config(
     return {"stunnel_id": stunnel_id, "config": config}
 
     
+def _remove_tunnel_background(
+    stunnel_id: str,
+    src_region: Optional[str] = None,
+    src_agent: Optional[str] = None,
+    src_plugin: Optional[str] = None,
+    dst_region: Optional[str] = None,
+    dst_agent: Optional[str] = None,
+    dst_plugin: Optional[str] = None
+) -> None:
+    """
+    Background task to remove a tunnel by shutting down src and dst tunnels.
+    Looks up tunnel info from database if not provided.
+    
+    Args:
+        stunnel_id: The tunnel ID to remove
+        src_region: Source region (optional, will look up from DB)
+        src_agent: Source agent (optional, will look up from DB)
+        src_plugin: Source plugin ID (optional, will look up from DB)
+        dst_region: Destination region (optional, will look up from DB)
+        dst_agent: Destination agent (optional, will look up from DB)
+        dst_plugin: Destination plugin ID (optional, will look up from DB)
+    """
+    logger.info(f"--- BACKGROUND TASK: Removing tunnel {stunnel_id} ---")
+    
+    if not stunnel_manager:
+        logger.error("Stunnel manager not initialized!")
+        return
+    
+    # Try to get tunnel info from database if not provided
+    db = SessionLocal()
+    try:
+        db_tunnel = db.query(TunnelRecord).filter(TunnelRecord.stunnel_id == stunnel_id).first()
+        
+        # Use provided params or fall back to database record
+        final_src_region = src_region
+        final_src_agent = src_agent
+        final_src_plugin = src_plugin
+        final_dst_region = dst_region
+        final_dst_agent = dst_agent
+        final_dst_plugin = dst_plugin
+        
+        if db_tunnel:
+            logger.info(f"Found database record for tunnel {stunnel_id}")
+            if not final_src_region:
+                final_src_region = db_tunnel.src_region
+            if not final_src_agent:
+                final_src_agent = db_tunnel.src_agent
+            if not final_src_plugin:
+                final_src_plugin = db_tunnel.stunnel_plugin_id
+            if not final_dst_region:
+                final_dst_region = db_tunnel.dst_region
+            if not final_dst_agent:
+                final_dst_agent = db_tunnel.dst_agent
+            # Note: dst_plugin is not stored in database, would need to be discovered
+        
+        # Use the stunnel manager's remove_tunnel method
+        if final_src_region and final_src_agent and final_src_plugin:
+            result = stunnel_manager.remove_tunnel(
+                stunnel_id=stunnel_id,
+                src_region=final_src_region,
+                src_agent=final_src_agent,
+                src_plugin_id=final_src_plugin,
+                dst_region=final_dst_region or "",
+                dst_agent=final_dst_agent or "",
+                dst_plugin_id=final_dst_plugin or ""
+            )
+            logger.info(f"Tunnel removal result: {result}")
+        else:
+            logger.warning(f"Missing source info - cannot remove tunnel {stunnel_id}")
+        
+        # Remove from database if exists
+        if db_tunnel:
+            logger.info(f"Deleting database record for tunnel {stunnel_id}")
+            db.delete(db_tunnel)
+            db.commit()
+            logger.info("Database record deleted.")
+        
+        logger.info("--- BACKGROUND TASK COMPLETED: Tunnel removal finished ---")
+        
+    except Exception as e:
+        logger.error(f"Failed to remove tunnel {stunnel_id} in background: {e}", exc_info=True)
+    finally:
+        db.close()
+
+    
 @app.delete("/tunnels/{stunnel_id}")
 def delete_tunnel(
     stunnel_id: str,
@@ -777,87 +862,37 @@ def delete_tunnel(
     dst_region: Optional[str] = Query(None, description="The destination region of the tunnel"),
     dst_agent: Optional[str] = Query(None, description="The destination agent of the tunnel"),
     dst_plugin: Optional[str] = Query(None, description="The destination stunnel plugin ID"),
-    db: Session = Depends(get_db)
 ):
     """
-    Remove a tunnel by sending removesrctunnel/removedsttunnel actions to the stunnel plugins.
+    Delete a tunnel by scheduling removal in the background.
+    Returns immediately; the actual removal happens asynchronously.
+    
     For live tunnels, provide src_region, src_agent, src_plugin from the tunnel info.
     For database tunnels, these will be looked up from the database record.
     """
-    logger.info(f"--- ENTERING delete_tunnel(stunnel_id='{stunnel_id}') ---")
-    if not stunnel_manager:
-        logger.error("Stunnel manager not initialized!")
-        raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
+    logger.info(f"--- DELETE REQUEST for tunnel '{stunnel_id}' ---")
     
-    # Try to get tunnel info from database first if not provided
-    db_tunnel = db.query(TunnelRecord).filter(TunnelRecord.stunnel_id == stunnel_id).first()
+    # Start tunnel removal in background thread
+    removal_thread = threading.Thread(
+        target=_remove_tunnel_background,
+        args=(stunnel_id,),
+        kwargs={
+            "src_region": src_region,
+            "src_agent": src_agent,
+            "src_plugin": src_plugin,
+            "dst_region": dst_region,
+            "dst_agent": dst_agent,
+            "dst_plugin": dst_plugin,
+        },
+        daemon=True
+    )
+    removal_thread.start()
     
-    # Use provided params or fall back to database record
-    final_src_region = src_region
-    final_src_agent = src_agent
-    final_src_plugin = src_plugin
-    final_dst_region = dst_region
-    final_dst_agent = dst_agent
-    final_dst_plugin = dst_plugin
-    
-    if db_tunnel:
-        logger.info(f"Found database record for tunnel {stunnel_id}")
-        if not final_src_region:
-            final_src_region = db_tunnel.src_region
-        if not final_src_agent:
-            final_src_agent = db_tunnel.src_agent
-        if not final_src_plugin:
-            final_src_plugin = db_tunnel.stunnel_plugin_id
-        if not final_dst_region:
-            final_dst_region = db_tunnel.dst_region
-        if not final_dst_agent:
-            final_dst_agent = db_tunnel.dst_agent
-        # Note: dst_plugin is not stored in database, would need to be discovered
-    
-    response = {"stunnel_id": stunnel_id, "src_removal": None, "dst_removal": None}
-    
-    try:
-        # Remove source tunnel
-        if final_src_region and final_src_agent and final_src_plugin:
-            logger.info(f"Removing source tunnel from {final_src_region}/{final_src_agent} plugin {final_src_plugin}")
-            src_result = stunnel_manager.remove_src_tunnel(
-                src_region=final_src_region,
-                src_agent=final_src_agent,
-                src_plugin_id=final_src_plugin,
-                stunnel_id=stunnel_id
-            )
-            response["src_removal"] = src_result
-            logger.info(f"Source tunnel removal result: {src_result}")
-        else:
-            logger.warning(f"Missing source info (region/agent/plugin) - cannot remove source tunnel")
-        
-        # Remove destination tunnel (if we have the destination plugin)
-        if final_dst_region and final_dst_agent and final_dst_plugin:
-            logger.info(f"Removing destination tunnel from {final_dst_region}/{final_dst_agent} plugin {final_dst_plugin}")
-            dst_result = stunnel_manager.remove_dst_tunnel(
-                dst_region=final_dst_region,
-                dst_agent=final_dst_agent,
-                dst_plugin_id=final_dst_plugin,
-                stunnel_id=stunnel_id
-            )
-            response["dst_removal"] = dst_result
-            logger.info(f"Destination tunnel removal result: {dst_result}")
-        else:
-            logger.info(f"Destination plugin not provided - skipping destination tunnel removal")
-        
-        # Remove from database if exists
-        if db_tunnel:
-            logger.info(f"Deleting database record for tunnel {stunnel_id}")
-            db.delete(db_tunnel)
-            db.commit()
-            logger.info("Database record deleted.")
-        
-        logger.info("--- EXITING delete_tunnel (Success) ---")
-        return {"stunnel_id": stunnel_id, "status": "Removal request sent", "details": response}
-        
-    except Exception as e:
-        logger.error(f"Failed to delete tunnel {stunnel_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")
+    return {
+        "stunnel_id": stunnel_id,
+        "status": "removal_in_progress",
+        "message": "Tunnel removal has been scheduled and will proceed in the background"
+    }
 
 
 @app.post("/agents/{region}/{agent}/restart")
