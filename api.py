@@ -36,6 +36,123 @@ plugin_id_to_stunnel_id = {}
 logstreamer_instance = None
 metrics_worker_running = False
 
+
+def _has_failed_messaging_connection() -> bool:
+    """Return True when client messaging has entered failed-connection mode."""
+    try:
+        return bool(cresco_client and getattr(cresco_client.messaging, "_failed_connection", False))
+    except Exception:
+        return False
+
+
+def _refresh_cresco_connection(force: bool = False) -> bool:
+    """
+    Ensure Cresco messaging is usable by clearing failed state and reconnecting when needed.
+    """
+    if not cresco_client:
+        return False
+
+    needs_refresh = force or _has_failed_messaging_connection() or not cresco_client.connected()
+    if not needs_refresh:
+        return True
+
+    try:
+        logger.warning("Refreshing Cresco connection state")
+        if hasattr(cresco_client.messaging, "reset_connection_state"):
+            cresco_client.messaging.reset_connection_state()
+
+        if not cresco_client.connected():
+            connected = cresco_client.connect()
+            if not connected:
+                logger.error("Failed to reconnect Cresco client")
+                return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Failed to refresh Cresco connection: {e}", exc_info=True)
+        return False
+
+
+def _refresh_stunnel_manager(force: bool = False) -> bool:
+    """
+    Recreate stunnel_manager when messaging is in failed state.
+    Optionally forces recreation regardless of current state.
+    """
+    global stunnel_manager
+
+    if not cresco_client:
+        return False
+
+    should_refresh = force or stunnel_manager is None or _has_failed_messaging_connection() or not cresco_client.connected()
+    if not should_refresh:
+        return True
+
+    try:
+        logger.warning("Refreshing StunnelDirect due to connection failure state")
+
+        if not _refresh_cresco_connection(force=force):
+            return False
+
+        stunnel_manager = StunnelDirect(cresco_client, logger=logger)
+        logger.info("StunnelDirect recreated successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to refresh stunnel manager: {e}", exc_info=True)
+        return False
+
+
+def _run_stunnel_call(operation, *args, **kwargs):
+    """
+    Execute a stunnel operation and retry once after manager refresh if needed.
+    """
+    _refresh_stunnel_manager()
+
+    # If caller passed a bound method from an old manager instance,
+    # bind to the current manager to avoid stale method retries.
+    method_name = getattr(operation, "__name__", None)
+    if method_name and stunnel_manager and hasattr(stunnel_manager, method_name):
+        call_op = getattr(stunnel_manager, method_name)
+    else:
+        call_op = operation
+
+    try:
+        result = call_op(*args, **kwargs)
+    except Exception as first_error:
+        logger.warning(f"Stunnel call failed on first attempt: {first_error}")
+        if _refresh_stunnel_manager(force=True):
+            retry_op = getattr(stunnel_manager, method_name) if method_name and hasattr(stunnel_manager, method_name) else call_op
+            return retry_op(*args, **kwargs)
+        raise
+
+    if _has_failed_messaging_connection():
+        logger.warning("Detected failed messaging state after stunnel call, retrying once")
+        if _refresh_stunnel_manager(force=True):
+            retry_op = getattr(stunnel_manager, method_name) if method_name and hasattr(stunnel_manager, method_name) else call_op
+            result = retry_op(*args, **kwargs)
+
+    return result
+
+
+def _run_cresco_call(operation, *args, **kwargs):
+    """
+    Execute a Cresco client/globalcontroller/admin call with one recovery retry.
+    """
+    _refresh_cresco_connection()
+    try:
+        result = operation(*args, **kwargs)
+    except Exception as first_error:
+        logger.warning(f"Cresco call failed on first attempt: {first_error}")
+        if _refresh_cresco_connection(force=True):
+            return operation(*args, **kwargs)
+        raise
+
+    if _has_failed_messaging_connection():
+        logger.warning("Detected failed messaging state after Cresco call, retrying once")
+        if _refresh_cresco_connection(force=True):
+            result = operation(*args, **kwargs)
+
+    return result
+
 def process_log_message(message: str):
     # Skip noisy messages that aren't stunnel related
     if "io.cresco.stunnel" not in message and "tunnel" not in message.lower():
@@ -88,8 +205,8 @@ def background_metrics_worker():
                 db.close()
                 
             # Subscribe to newly discovered agents
-            if cresco_client and cresco_client.connected() and logstreamer_instance:
-                agents = cresco_client.globalcontroller.get_agent_list()
+            if cresco_client and logstreamer_instance:
+                agents = _run_cresco_call(cresco_client.globalcontroller.get_agent_list)
                 if agents:
                     for agent in agents:
                         r = agent.get('region') or agent.get('region_id')
@@ -282,7 +399,8 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
     cresco_tunnels = []
     if stunnel_manager and src_region and src_agent and src_plugin_id:
         try:
-            live_tunnels = stunnel_manager.get_tunnel_list(
+            live_tunnels = _run_stunnel_call(
+                stunnel_manager.get_tunnel_list,
                 src_region=src_region, src_agent=src_agent, src_plugin_id=src_plugin_id
             )
             if live_tunnels: cresco_tunnels = live_tunnels
@@ -297,7 +415,7 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
     # Include live agents and live tunnels from Cresco global controller if requested
     if include_agents and cresco_client:
         try:
-            agents = cresco_client.globalcontroller.get_agent_list()
+            agents = _run_cresco_call(cresco_client.globalcontroller.get_agent_list)
             response["agents"] = agents
             
             # Also gather live tunnels from all stunnel plugins across all agents
@@ -311,9 +429,10 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
                     if agent_region and agent_id:
                         try:
                             # Find stunnel plugin on this agent
-                            plugin_id = stunnel_manager.find_existing_stunnel_plugin(agent_region, agent_id)
+                            plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, agent_region, agent_id)
                             if plugin_id:
-                                live_tunnels = stunnel_manager.get_tunnel_list(
+                                live_tunnels = _run_stunnel_call(
+                                    stunnel_manager.get_tunnel_list,
                                     src_region=agent_region,
                                     src_agent=agent_id,
                                     src_plugin_id=plugin_id
@@ -326,7 +445,8 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
                                             if tunnel_id and tunnel_id not in live_tunnels_map:
                                                 # Fetch full tunnel config to get dst_agent, ports, etc.
                                                 try:
-                                                    config = stunnel_manager.get_tunnel_config(
+                                                    config = _run_stunnel_call(
+                                                        stunnel_manager.get_tunnel_config,
                                                         src_region=agent_region,
                                                         src_agent=agent_id,
                                                         src_plugin_id=plugin_id,
@@ -407,7 +527,8 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
          
     tunnel_id = str(uuid.uuid1())
     
-    response = stunnel_manager.create_tunnel(
+    response = _run_stunnel_call(
+        stunnel_manager.create_tunnel,
         stunnel_id=tunnel_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
@@ -422,7 +543,7 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     if response is None:
         raise HTTPException(status_code=400, detail="Failed to create direct tunnel. Verify agents and plugins.")
 
-    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    src_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, req.src_region, req.src_agent)
 
     db_tunnel = TunnelRecord(
         stunnel_id=tunnel_id,
@@ -463,7 +584,8 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     hop2_id = str(uuid.uuid1())
     
     # Hop 1: Source to Proxy
-    response_hop1 = stunnel_manager.create_tunnel(
+    response_hop1 = _run_stunnel_call(
+        stunnel_manager.create_tunnel,
         stunnel_id=hop1_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
@@ -476,7 +598,8 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     )
 
     # Hop 2: Proxy to Destination
-    response_hop2 = stunnel_manager.create_tunnel(
+    response_hop2 = _run_stunnel_call(
+        stunnel_manager.create_tunnel,
         stunnel_id=hop2_id,
         src_region=proxy_region,
         src_agent=proxy_agent,
@@ -491,8 +614,8 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     if response_hop1 is None or response_hop2 is None:
         raise HTTPException(status_code=400, detail="Failed to create proxy tunnel hops. Verify agents and plugins.")
 
-    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
-    proxy_plugin_id = stunnel_manager.find_existing_stunnel_plugin(proxy_region, proxy_agent)
+    src_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, req.src_region, req.src_agent)
+    proxy_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, proxy_region, proxy_agent)
 
     # Persist Hop 1 to DB
     db_tunnel_hop1 = TunnelRecord(
@@ -551,7 +674,7 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
     import random
     import uuid
     
-    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    src_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, req.src_region, req.src_agent)
     
     tunnel_ids = []
     haproxy_servers = []
@@ -564,7 +687,8 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
         tunnel_port = str(random.randint(10000, 60000))
         tunnel_id = str(uuid.uuid1())
         
-        response = stunnel_manager.create_tunnel(
+        response = _run_stunnel_call(
+            stunnel_manager.create_tunnel,
             stunnel_id=tunnel_id,
             src_region=req.src_region,
             src_agent=req.src_agent,
@@ -608,7 +732,7 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
     if not pipeline_id:
         raise HTTPException(status_code=500, detail="Failed to deploy HAProxy plugin.")
         
-    pipeline_config = cresco_client.globalcontroller.get_pipeline_info(pipeline_id)
+    pipeline_config = _run_cresco_call(cresco_client.globalcontroller.get_pipeline_info, pipeline_id)
     plugin_id = pipeline_config['nodes'][0]['node_id']
     
     servers_block = "\n".join(haproxy_servers)
@@ -728,7 +852,8 @@ def get_tunnel_status(
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
          
-    status = stunnel_manager.get_tunnel_status(
+    status = _run_stunnel_call(
+        stunnel_manager.get_tunnel_status,
         src_region=src_region,
         src_agent=src_agent,
         src_plugin_id=src_plugin_id,
@@ -755,7 +880,8 @@ def get_tunnel_config(
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
          
-    config = stunnel_manager.get_tunnel_config(
+    config = _run_stunnel_call(
+        stunnel_manager.get_tunnel_config,
         src_region=src_region,
         src_agent=src_agent,
         src_plugin_id=src_plugin_id,
@@ -776,9 +902,9 @@ def _remove_tunnel_background(
     dst_region: Optional[str] = None,
     dst_agent: Optional[str] = None,
     dst_plugin: Optional[str] = None
-) -> None:
+) -> dict:
     """
-    Background task to remove a tunnel by shutting down src and dst tunnels.
+    Remove a tunnel by shutting down src and dst tunnels.
     Looks up tunnel info from database if not provided.
     
     Args:
@@ -790,11 +916,11 @@ def _remove_tunnel_background(
         dst_agent: Destination agent (optional, will look up from DB)
         dst_plugin: Destination plugin ID (optional, will look up from DB)
     """
-    logger.info(f"--- BACKGROUND TASK: Removing tunnel {stunnel_id} ---")
+    logger.info(f"--- Removing tunnel {stunnel_id} ---")
     
     if not stunnel_manager:
         logger.error("Stunnel manager not initialized!")
-        return
+        return {"stunnel_id": stunnel_id, "status": "error", "detail": "Stunnel manager not initialized"}
     
     # Try to get tunnel info from database if not provided
     db = SessionLocal()
@@ -823,9 +949,17 @@ def _remove_tunnel_background(
                 final_dst_agent = db_tunnel.dst_agent
             # Note: dst_plugin is not stored in database, would need to be discovered
         
+        if not final_dst_plugin and final_dst_region and final_dst_agent:
+            final_dst_plugin = _run_stunnel_call(
+                stunnel_manager.find_existing_stunnel_plugin,
+                final_dst_region,
+                final_dst_agent,
+            )
+
         # Use the stunnel manager's remove_tunnel method
         if final_src_region and final_src_agent and final_src_plugin:
-            result = stunnel_manager.remove_tunnel(
+            result = _run_stunnel_call(
+                stunnel_manager.remove_tunnel,
                 stunnel_id=stunnel_id,
                 src_region=final_src_region,
                 src_agent=final_src_agent,
@@ -837,6 +971,13 @@ def _remove_tunnel_background(
             logger.info(f"Tunnel removal result: {result}")
         else:
             logger.warning(f"Missing source info - cannot remove tunnel {stunnel_id}")
+            result = {
+                "stunnel_id": stunnel_id,
+                "src_removal": None,
+                "dst_removal": None,
+                "fully_removed": False,
+                "detail": "Missing source info",
+            }
         
         # Remove from database if exists
         if db_tunnel:
@@ -845,10 +986,16 @@ def _remove_tunnel_background(
             db.commit()
             logger.info("Database record deleted.")
         
-        logger.info("--- BACKGROUND TASK COMPLETED: Tunnel removal finished ---")
+        logger.info("--- Tunnel removal finished ---")
+        return {
+            "stunnel_id": stunnel_id,
+            "status": "removed" if result.get("fully_removed") else "partial",
+            "details": result,
+        }
         
     except Exception as e:
         logger.error(f"Failed to remove tunnel {stunnel_id} in background: {e}", exc_info=True)
+        return {"stunnel_id": stunnel_id, "status": "error", "detail": str(e)}
     finally:
         db.close()
 
@@ -864,34 +1011,39 @@ def delete_tunnel(
     dst_plugin: Optional[str] = Query(None, description="The destination stunnel plugin ID"),
 ):
     """
-    Delete a tunnel by scheduling removal in the background.
-    Returns immediately; the actual removal happens asynchronously.
+    Delete a tunnel and wait for removal to complete before returning.
     
     For live tunnels, provide src_region, src_agent, src_plugin from the tunnel info.
     For database tunnels, these will be looked up from the database record.
     """
     logger.info(f"--- DELETE REQUEST for tunnel '{stunnel_id}' ---")
     
-    # Start tunnel removal in background thread
-    removal_thread = threading.Thread(
-        target=_remove_tunnel_background,
-        args=(stunnel_id,),
-        kwargs={
-            "src_region": src_region,
-            "src_agent": src_agent,
-            "src_plugin": src_plugin,
-            "dst_region": dst_region,
-            "dst_agent": dst_agent,
-            "dst_plugin": dst_plugin,
-        },
-        daemon=True
+    removal_result = _remove_tunnel_background(
+        stunnel_id=stunnel_id,
+        src_region=src_region,
+        src_agent=src_agent,
+        src_plugin=src_plugin,
+        dst_region=dst_region,
+        dst_agent=dst_agent,
+        dst_plugin=dst_plugin,
     )
-    removal_thread.start()
-    
+
+    if removal_result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=removal_result.get("detail", "Failed to remove tunnel"))
+
+    if removal_result.get("status") == "partial":
+        return {
+            "stunnel_id": stunnel_id,
+            "status": "partial",
+            "message": "Tunnel removal completed partially. One side may still be present.",
+            "details": removal_result.get("details"),
+        }
+
     return {
         "stunnel_id": stunnel_id,
-        "status": "removal_in_progress",
-        "message": "Tunnel removal has been scheduled and will proceed in the background"
+        "status": "removed",
+        "message": "Tunnel removed successfully.",
+        "details": removal_result.get("details"),
     }
 
 
@@ -905,7 +1057,7 @@ def restart_agent(region: str, agent: str):
     
     try:
         logger.info(f"Restarting agent {region}/{agent} via API...")
-        cresco_client.admin.restartframework(region, agent)
+        _run_cresco_call(cresco_client.admin.restartframework, region, agent)
         return {"message": f"Restart command sent to agent {region}/{agent}"}
     except Exception as e:
         logger.error(f"Failed to restart agent {region}/{agent}: {e}")
@@ -921,7 +1073,7 @@ def stop_agent(region: str, agent: str):
     
     try:
         logger.info(f"Stopping agent {region}/{agent} via API...")
-        cresco_client.admin.stopcontroller(region, agent)
+        _run_cresco_call(cresco_client.admin.stopcontroller, region, agent)
         return {"message": f"Stop command sent to agent {region}/{agent}"}
     except Exception as e:
         logger.error(f"Failed to stop agent {region}/{agent}: {e}")
@@ -937,7 +1089,7 @@ def get_agents():
         
     try:
         logger.info("Fetching agent list from Cresco global controller...")
-        agents = cresco_client.globalcontroller.get_agent_list()
+        agents = _run_cresco_call(cresco_client.globalcontroller.get_agent_list)
         # Ensure we return valid JSON (list of dicts typically)
         return {"agents": agents}
     except Exception as e:
