@@ -91,8 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${agent.environment || 'N/A'}</td>
                     <td>
                         <button class="btn btn-secondary btn-sm restart-btn" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Restart</button>
-                        <button class="btn btn-danger btn-sm stop-btn" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Stop</button>
-                    </td>
+                        <button class="btn btn-danger btn-sm stop-btn" style="background-color: red; color: white;" data-region="${agent.region_id}" data-agent="${agent.agent_id}">Stop</button>                    </td>
                 `;
                 tbody.appendChild(tr);
             });
