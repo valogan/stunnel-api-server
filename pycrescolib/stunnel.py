@@ -129,8 +129,120 @@ class StunnelDirect:
             if 'tunnel_config' in result:
                 return json.loads(result['tunnel_config'])
         except Exception as e:
-            self.logger.error(f"Error configuring existing tunnel: {e}")
+            self.logger.error(f"Error getting tunnel config: {e}")
             return {}
+
+    def remove_src_tunnel(self, src_region: str, src_agent: str, src_plugin_id: str, stunnel_id: str) -> dict | None:
+        """
+        Remove a source tunnel from the stunnel plugin.
+        Sends 'removesrctunnel' CONFIG action to the stunnel plugin.
+        """
+        try:
+            self.logger.info(f"Removing source tunnel {stunnel_id} from {src_region}/{src_agent}")
+            message_event_type = 'CONFIG'
+            message_payload = {
+                'action': 'removesrctunnel',
+                'action_stunnel_id': stunnel_id
+            }
+
+            result = self.client.messaging.global_plugin_msgevent(True, message_event_type, message_payload, src_region, src_agent, src_plugin_id)
+            self.logger.info(f"Remove source tunnel result: {result}")
+            return result
+        except Exception as e:
+            self.logger.error(f"Error removing source tunnel: {e}")
+            return None
+
+    def remove_dst_tunnel(self, dst_region: str, dst_agent: str, dst_plugin_id: str, stunnel_id: str) -> dict | None:
+        """
+        Remove a destination tunnel from the stunnel plugin.
+        Sends 'removedsttunnel' CONFIG action to the stunnel plugin.
+        """
+        try:
+            self.logger.info(f"Removing destination tunnel {stunnel_id} from {dst_region}/{dst_agent}")
+            message_event_type = 'CONFIG'
+            message_payload = {
+                'action': 'removedsttunnel',
+                'action_stunnel_id': stunnel_id
+            }
+
+            result = self.client.messaging.global_plugin_msgevent(True, message_event_type, message_payload, dst_region, dst_agent, dst_plugin_id)
+            self.logger.info(f"Remove destination tunnel result: {result}")
+            return result
+        except Exception as e:
+            self.logger.error(f"Error removing destination tunnel: {e}")
+            return None
+
+    def remove_tunnel(self, stunnel_id: str, src_region: str, src_agent: str, src_plugin_id: str,
+                      dst_region: str, dst_agent: str, dst_plugin_id: str) -> dict:
+        """
+        Remove both source and destination tunnels.
+        This is a convenience method that removes the src and dst tunnels in sequence.
+        
+        Args:
+            stunnel_id: The tunnel ID to remove
+            src_region: Source region
+            src_agent: Source agent
+            src_plugin_id: Source plugin ID
+            dst_region: Destination region
+            dst_agent: Destination agent
+            dst_plugin_id: Destination plugin ID
+        
+        Returns:
+            Dict with src_removal and dst_removal results
+        """
+        self.logger.info(f"Removing tunnel {stunnel_id}")
+        response = {
+            "stunnel_id": stunnel_id,
+            "src_removal": None,
+            "dst_removal": None,
+            "dst_plugin_resolved": None,
+            "fully_removed": False,
+        }
+        
+        try:
+            # Resolve destination plugin when destination location is known but plugin was not supplied.
+            final_dst_plugin_id = dst_plugin_id
+            if not final_dst_plugin_id and dst_region and dst_agent:
+                final_dst_plugin_id = self.find_existing_stunnel_plugin(dst_region, dst_agent)
+                response["dst_plugin_resolved"] = final_dst_plugin_id
+                if final_dst_plugin_id:
+                    self.logger.info(
+                        f"Resolved destination plugin for {dst_region}/{dst_agent}: {final_dst_plugin_id}"
+                    )
+
+            # Remove source tunnel
+            if src_region and src_agent and src_plugin_id:
+                self.logger.info(f"Removing source tunnel from {src_region}/{src_agent}")
+                src_result = self.remove_src_tunnel(
+                    src_region=src_region,
+                    src_agent=src_agent,
+                    src_plugin_id=src_plugin_id,
+                    stunnel_id=stunnel_id
+                )
+                response["src_removal"] = src_result
+            else:
+                self.logger.warning("Missing source info - skipping source tunnel removal")
+            
+            # Remove destination tunnel
+            if dst_region and dst_agent and final_dst_plugin_id:
+                self.logger.info(f"Removing destination tunnel from {dst_region}/{dst_agent}")
+                dst_result = self.remove_dst_tunnel(
+                    dst_region=dst_region,
+                    dst_agent=dst_agent,
+                    dst_plugin_id=final_dst_plugin_id,
+                    stunnel_id=stunnel_id
+                )
+                response["dst_removal"] = dst_result
+            else:
+                self.logger.info("Destination plugin not provided - skipping destination tunnel removal")
+
+            response["fully_removed"] = bool(response["src_removal"] and response["dst_removal"])
+        
+        except Exception as e:
+            self.logger.error(f"Error removing tunnel {stunnel_id}: {e}", exc_info=True)
+            response["error"] = str(e)
+        
+        return response
 
 
 class StunnelCADL:

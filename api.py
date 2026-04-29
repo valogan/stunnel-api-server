@@ -1,5 +1,6 @@
 import logging
 import configparser
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -12,6 +13,7 @@ import asyncio
 
 from pycrescolib.clientlib import clientlib
 from pycrescolib.haproxy import HAProxyDeployer
+from pycrescolib.proxy_shield import ProxyShieldDeployer
 from pycrescolib.stunnel import StunnelDirect
 from fastapi import Depends
 from sqlalchemy.orm import Session
@@ -35,6 +37,123 @@ active_metrics_cache = {}
 plugin_id_to_stunnel_id = {}
 logstreamer_instance = None
 metrics_worker_running = False
+
+
+def _has_failed_messaging_connection() -> bool:
+    """Return True when client messaging has entered failed-connection mode."""
+    try:
+        return bool(cresco_client and getattr(cresco_client.messaging, "_failed_connection", False))
+    except Exception:
+        return False
+
+
+def _refresh_cresco_connection(force: bool = False) -> bool:
+    """
+    Ensure Cresco messaging is usable by clearing failed state and reconnecting when needed.
+    """
+    if not cresco_client:
+        return False
+
+    needs_refresh = force or _has_failed_messaging_connection() or not cresco_client.connected()
+    if not needs_refresh:
+        return True
+
+    try:
+        logger.warning("Refreshing Cresco connection state")
+        if hasattr(cresco_client.messaging, "reset_connection_state"):
+            cresco_client.messaging.reset_connection_state()
+
+        if not cresco_client.connected():
+            connected = cresco_client.connect()
+            if not connected:
+                logger.error("Failed to reconnect Cresco client")
+                return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Failed to refresh Cresco connection: {e}", exc_info=True)
+        return False
+
+
+def _refresh_stunnel_manager(force: bool = False) -> bool:
+    """
+    Recreate stunnel_manager when messaging is in failed state.
+    Optionally forces recreation regardless of current state.
+    """
+    global stunnel_manager
+
+    if not cresco_client:
+        return False
+
+    should_refresh = force or stunnel_manager is None or _has_failed_messaging_connection() or not cresco_client.connected()
+    if not should_refresh:
+        return True
+
+    try:
+        logger.warning("Refreshing StunnelDirect due to connection failure state")
+
+        if not _refresh_cresco_connection(force=force):
+            return False
+
+        stunnel_manager = StunnelDirect(cresco_client, logger=logger)
+        logger.info("StunnelDirect recreated successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to refresh stunnel manager: {e}", exc_info=True)
+        return False
+
+
+def _run_stunnel_call(operation, *args, **kwargs):
+    """
+    Execute a stunnel operation and retry once after manager refresh if needed.
+    """
+    _refresh_stunnel_manager()
+
+    # If caller passed a bound method from an old manager instance,
+    # bind to the current manager to avoid stale method retries.
+    method_name = getattr(operation, "__name__", None)
+    if method_name and stunnel_manager and hasattr(stunnel_manager, method_name):
+        call_op = getattr(stunnel_manager, method_name)
+    else:
+        call_op = operation
+
+    try:
+        result = call_op(*args, **kwargs)
+    except Exception as first_error:
+        logger.warning(f"Stunnel call failed on first attempt: {first_error}")
+        if _refresh_stunnel_manager(force=True):
+            retry_op = getattr(stunnel_manager, method_name) if method_name and hasattr(stunnel_manager, method_name) else call_op
+            return retry_op(*args, **kwargs)
+        raise
+
+    if _has_failed_messaging_connection():
+        logger.warning("Detected failed messaging state after stunnel call, retrying once")
+        if _refresh_stunnel_manager(force=True):
+            retry_op = getattr(stunnel_manager, method_name) if method_name and hasattr(stunnel_manager, method_name) else call_op
+            result = retry_op(*args, **kwargs)
+
+    return result
+
+
+def _run_cresco_call(operation, *args, **kwargs):
+    """
+    Execute a Cresco client/globalcontroller/admin call with one recovery retry.
+    """
+    _refresh_cresco_connection()
+    try:
+        result = operation(*args, **kwargs)
+    except Exception as first_error:
+        logger.warning(f"Cresco call failed on first attempt: {first_error}")
+        if _refresh_cresco_connection(force=True):
+            return operation(*args, **kwargs)
+        raise
+
+    if _has_failed_messaging_connection():
+        logger.warning("Detected failed messaging state after Cresco call, retrying once")
+        if _refresh_cresco_connection(force=True):
+            result = operation(*args, **kwargs)
+
+    return result
 
 def process_log_message(message: str):
     # Skip noisy messages that aren't stunnel related
@@ -88,8 +207,8 @@ def background_metrics_worker():
                 db.close()
                 
             # Subscribe to newly discovered agents
-            if cresco_client and cresco_client.connected() and logstreamer_instance:
-                agents = cresco_client.globalcontroller.get_agent_list()
+            if cresco_client and logstreamer_instance:
+                agents = _run_cresco_call(cresco_client.globalcontroller.get_agent_list)
                 if agents:
                     for agent in agents:
                         r = agent.get('region') or agent.get('region_id')
@@ -241,8 +360,13 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plugin_id=None, dst_region=None, dst_agent=None, src_port=None, dst_host=None, dst_port=None):
-    """Helper to build the tunnels response block for both REST and WS"""
+def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plugin_id=None, dst_region=None, dst_agent=None, src_port=None, dst_host=None, dst_port=None, include_agents=False):
+    """Helper to build the tunnels response block for both REST and WS
+    
+    Args:
+        include_agents: If True, also include live agents from Cresco global controller
+                       and live tunnels from all stunnel plugins
+    """
     query = db.query(TunnelRecord)
     if src_region: query = query.filter(TunnelRecord.src_region == src_region)
     if src_agent: query = query.filter(TunnelRecord.src_agent == src_agent)
@@ -277,17 +401,82 @@ def build_tunnels_response(db: Session, src_region=None, src_agent=None, src_plu
     cresco_tunnels = []
     if stunnel_manager and src_region and src_agent and src_plugin_id:
         try:
-            live_tunnels = stunnel_manager.get_tunnel_list(
+            live_tunnels = _run_stunnel_call(
+                stunnel_manager.get_tunnel_list,
                 src_region=src_region, src_agent=src_agent, src_plugin_id=src_plugin_id
             )
             if live_tunnels: cresco_tunnels = live_tunnels
         except Exception:
             pass
 
-    return {
+    response = {
         "database_tunnels": tunnels_data,
         "live_cresco_tunnels": cresco_tunnels
     }
+    
+    # Include live agents and live tunnels from Cresco global controller if requested
+    if include_agents and cresco_client:
+        try:
+            agents = _run_cresco_call(cresco_client.globalcontroller.get_agent_list)
+            response["agents"] = agents
+            
+            # Also gather live tunnels from all stunnel plugins across all agents
+            # Use a dict to deduplicate by stunnel_id (each plugin knows about all tunnels)
+            live_tunnels_map = {}
+            if stunnel_manager and agents:
+                for agent_info in agents:
+                    agent_region = agent_info.get('region') or agent_info.get('region_id')
+                    agent_id = agent_info.get('agent') or agent_info.get('agent_id')
+                    
+                    if agent_region and agent_id:
+                        try:
+                            # Find stunnel plugin on this agent
+                            plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, agent_region, agent_id)
+                            if plugin_id:
+                                live_tunnels = _run_stunnel_call(
+                                    stunnel_manager.get_tunnel_list,
+                                    src_region=agent_region,
+                                    src_agent=agent_id,
+                                    src_plugin_id=plugin_id
+                                )
+                                if live_tunnels:
+                                    # Process each tunnel to get full config
+                                    for tunnel in live_tunnels:
+                                        if isinstance(tunnel, dict):
+                                            tunnel_id = tunnel.get('stunnel_id')
+                                            if tunnel_id and tunnel_id not in live_tunnels_map:
+                                                # Fetch full tunnel config to get dst_agent, ports, etc.
+                                                try:
+                                                    config = _run_stunnel_call(
+                                                        stunnel_manager.get_tunnel_config,
+                                                        src_region=agent_region,
+                                                        src_agent=agent_id,
+                                                        src_plugin_id=plugin_id,
+                                                        stunnel_id=tunnel_id
+                                                    )
+                                                    if config:
+                                                        logger.info(f"Tunnel {tunnel_id} config: {config}")
+                                                        # Merge ALL config fields into tunnel info
+                                                        for key, value in config.items():
+                                                            if value is not None:
+                                                                tunnel[key] = value
+                                                    else:
+                                                        logger.info(f"No config returned for tunnel {tunnel_id}")
+                                                except Exception as e:
+                                                    logger.warning(f"Could not get config for tunnel {tunnel_id}: {e}")
+                                                
+                                                # Store in dedup map - use src_agent from config as actual source
+                                                live_tunnels_map[tunnel_id] = tunnel
+                        except Exception as e:
+                            logger.debug(f"Could not get tunnels from {agent_region}/{agent_id}: {e}")
+            
+            response["live_tunnels"] = list(live_tunnels_map.values())
+        except Exception as e:
+            logger.error(f"Failed to fetch live agents for response: {e}")
+            response["agents"] = []
+            response["live_tunnels"] = []
+
+    return response
 
 async def websocket_metrics_task():
     """Background task to broadcast metrics continuously"""
@@ -296,7 +485,8 @@ async def websocket_metrics_task():
             if manager.active_connections:
                 db = SessionLocal()
                 try:
-                    data = build_tunnels_response(db)
+                    # Include live agents in WebSocket broadcast for graph view
+                    data = build_tunnels_response(db, include_agents=True)
                     await manager.broadcast(data)
                 finally:
                     db.close()
@@ -323,6 +513,23 @@ class LoadBalancedTunnelRequest(BaseModel):
     dst_agent: str
     destinations: list[str]
     buffer_size: str = "1024"
+
+
+class ProxyShieldDeployRequest(BaseModel):
+    target_region: str
+    target_agent: str
+    jar_url: str = "https://github.com/valogan/cresco-proxy-shield-plugin/releases/download/cresco/proxy-shield-manager-1.0-SNAPSHOT.jar"
+
+
+class ProxyShieldTargetHostRequest(BaseModel):
+    target_host: str
+
+
+class ProxyShieldDeployAndConfigureRequest(BaseModel):
+    target_region: str
+    target_agent: str
+    target_host: str
+    jar_url: str = "https://github.com/valogan/cresco-proxy-shield-plugin/releases/download/cresco/proxy-shield-manager-1.0-SNAPSHOT.jar"
 # --- Endpoints ---
 
 @app.get("/")
@@ -339,7 +546,8 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
          
     tunnel_id = str(uuid.uuid1())
     
-    response = stunnel_manager.create_tunnel(
+    response = _run_stunnel_call(
+        stunnel_manager.create_tunnel,
         stunnel_id=tunnel_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
@@ -354,7 +562,7 @@ def create_tunnel(req: TunnelCreateRequest, db: Session = Depends(get_db)):
     if response is None:
         raise HTTPException(status_code=400, detail="Failed to create direct tunnel. Verify agents and plugins.")
 
-    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    src_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, req.src_region, req.src_agent)
 
     db_tunnel = TunnelRecord(
         stunnel_id=tunnel_id,
@@ -395,7 +603,8 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     hop2_id = str(uuid.uuid1())
     
     # Hop 1: Source to Proxy
-    response_hop1 = stunnel_manager.create_tunnel(
+    response_hop1 = _run_stunnel_call(
+        stunnel_manager.create_tunnel,
         stunnel_id=hop1_id,
         src_region=req.src_region,
         src_agent=req.src_agent,
@@ -408,7 +617,8 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     )
 
     # Hop 2: Proxy to Destination
-    response_hop2 = stunnel_manager.create_tunnel(
+    response_hop2 = _run_stunnel_call(
+        stunnel_manager.create_tunnel,
         stunnel_id=hop2_id,
         src_region=proxy_region,
         src_agent=proxy_agent,
@@ -423,8 +633,8 @@ def create_tunnel_proxy(req: TunnelCreateRequest, db: Session = Depends(get_db))
     if response_hop1 is None or response_hop2 is None:
         raise HTTPException(status_code=400, detail="Failed to create proxy tunnel hops. Verify agents and plugins.")
 
-    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
-    proxy_plugin_id = stunnel_manager.find_existing_stunnel_plugin(proxy_region, proxy_agent)
+    src_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, req.src_region, req.src_agent)
+    proxy_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, proxy_region, proxy_agent)
 
     # Persist Hop 1 to DB
     db_tunnel_hop1 = TunnelRecord(
@@ -483,7 +693,7 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
     import random
     import uuid
     
-    src_plugin_id = stunnel_manager.find_existing_stunnel_plugin(req.src_region, req.src_agent)
+    src_plugin_id = _run_stunnel_call(stunnel_manager.find_existing_stunnel_plugin, req.src_region, req.src_agent)
     
     tunnel_ids = []
     haproxy_servers = []
@@ -496,7 +706,8 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
         tunnel_port = str(random.randint(10000, 60000))
         tunnel_id = str(uuid.uuid1())
         
-        response = stunnel_manager.create_tunnel(
+        response = _run_stunnel_call(
+            stunnel_manager.create_tunnel,
             stunnel_id=tunnel_id,
             src_region=req.src_region,
             src_agent=req.src_agent,
@@ -540,7 +751,7 @@ def create_tunnel_load_balanced(req: LoadBalancedTunnelRequest, db: Session = De
     if not pipeline_id:
         raise HTTPException(status_code=500, detail="Failed to deploy HAProxy plugin.")
         
-    pipeline_config = cresco_client.globalcontroller.get_pipeline_info(pipeline_id)
+    pipeline_config = _run_cresco_call(cresco_client.globalcontroller.get_pipeline_info, pipeline_id)
     plugin_id = pipeline_config['nodes'][0]['node_id']
     
     servers_block = "\n".join(haproxy_servers)
@@ -585,6 +796,225 @@ backend tunnel_backend
             "haproxy_pipeline": pipeline_id,
             "haproxy_plugin": plugin_id
         }
+    }
+
+
+@app.post("/proxy-shield/deploy")
+def deploy_proxy_shield_plugin(req: ProxyShieldDeployRequest):
+    """
+    Deploy the proxy shield plugin to a target region/agent.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    deployer = ProxyShieldDeployer(cresco_client, logger)
+    pipeline_id = deployer.deploy_proxy_shield_plugin(req.target_region, req.target_agent, req.jar_url)
+
+    if not pipeline_id:
+        raise HTTPException(status_code=500, detail="Failed to deploy proxy shield plugin.")
+
+    pipeline_config = _run_cresco_call(cresco_client.globalcontroller.get_pipeline_info, pipeline_id)
+    plugin_id = None
+    if pipeline_config and pipeline_config.get("nodes"):
+        plugin_id = pipeline_config["nodes"][0].get("node_id")
+
+    return {
+        "message": "Proxy shield plugin deployed successfully.",
+        "data": {
+            "pipeline_id": pipeline_id,
+            "plugin_id": plugin_id,
+            "target_region": req.target_region,
+            "target_agent": req.target_agent,
+            "jar_url": req.jar_url,
+        },
+    }
+
+
+@app.post("/proxy-shield/deploy-and-configure")
+def deploy_and_configure_proxy_shield(req: ProxyShieldDeployAndConfigureRequest):
+    """
+    Deploy Proxy Shield and immediately update TARGET_HOST + restart in one call.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    deployer = ProxyShieldDeployer(cresco_client, logger)
+    pipeline_id = deployer.deploy_proxy_shield_plugin(req.target_region, req.target_agent, req.jar_url)
+    if not pipeline_id:
+        raise HTTPException(status_code=500, detail="Failed to deploy proxy shield plugin.")
+
+    pipeline_config = _run_cresco_call(cresco_client.globalcontroller.get_pipeline_info, pipeline_id)
+    plugin_id = None
+    if pipeline_config and pipeline_config.get("nodes"):
+        plugin_id = pipeline_config["nodes"][0].get("node_id")
+
+    if not plugin_id:
+        raise HTTPException(status_code=500, detail="Proxy shield deployed but plugin_id could not be resolved.")
+
+    update_restart_result = _proxy_shield_call(
+        "EXEC",
+        "updateandrestart",
+        req.target_region,
+        req.target_agent,
+        plugin_id,
+        {"target_host": req.target_host},
+    )
+
+    action_status = update_restart_result.get("status") if isinstance(update_restart_result, dict) else None
+    if action_status not in ("10", 10):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Proxy shield deployed, but update/restart failed.",
+                "pipeline_id": pipeline_id,
+                "plugin_id": plugin_id,
+                "action_result": update_restart_result,
+            },
+        )
+
+    return {
+        "message": "Proxy shield deployed and configured successfully.",
+        "data": {
+            "pipeline_id": pipeline_id,
+            "plugin_id": plugin_id,
+            "target_region": req.target_region,
+            "target_agent": req.target_agent,
+            "target_host": req.target_host,
+            "jar_url": req.jar_url,
+            "configure_action": "updateandrestart",
+            "configure_result": update_restart_result,
+        },
+    }
+
+
+def _proxy_shield_call(event_type: str, action: str, region: str, agent: str, plugin_id: str, extra: dict | None = None):
+    """Invoke proxy-shield plugin actions using the Cresco messaging API."""
+    payload = {"action": action}
+    if extra:
+        payload.update(extra)
+
+    return _run_cresco_call(
+        cresco_client.messaging.global_plugin_msgevent,
+        True,
+        event_type,
+        payload,
+        region,
+        agent,
+        plugin_id,
+    )
+
+
+@app.get("/proxy-shield/{region}/{agent}/{plugin_id}/status")
+def proxy_shield_get_status(region: str, agent: str, plugin_id: str):
+    """Proxy Shield EXEC action: getstatus."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call("EXEC", "getstatus", region, agent, plugin_id)
+    status_info = result.get("status_info") if isinstance(result, dict) else None
+    parsed_status_info = status_info
+    if isinstance(status_info, str):
+        try:
+            parsed_status_info = json.loads(status_info)
+        except Exception:
+            parsed_status_info = status_info
+
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "getstatus",
+        "result": result,
+        "status_info": parsed_status_info,
+    }
+
+
+@app.get("/proxy-shield/{region}/{agent}/{plugin_id}/target-host")
+def proxy_shield_get_target_host(region: str, agent: str, plugin_id: str):
+    """Proxy Shield EXEC action: gettargethost."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call("EXEC", "gettargethost", region, agent, plugin_id)
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "gettargethost",
+        "result": result,
+        "target_host": result.get("target_host") if isinstance(result, dict) else None,
+    }
+
+
+@app.post("/proxy-shield/{region}/{agent}/{plugin_id}/target-host")
+def proxy_shield_update_target_host(
+    region: str,
+    agent: str,
+    plugin_id: str,
+    req: ProxyShieldTargetHostRequest,
+):
+    """Proxy Shield CONFIG action: updatetargethost."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call(
+        "CONFIG",
+        "updatetargethost",
+        region,
+        agent,
+        plugin_id,
+        {"target_host": req.target_host},
+    )
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "updatetargethost",
+        "result": result,
+    }
+
+
+@app.post("/proxy-shield/{region}/{agent}/{plugin_id}/restart")
+def proxy_shield_restart(region: str, agent: str, plugin_id: str):
+    """Proxy Shield CONFIG action: restartproxyshield."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call("CONFIG", "restartproxyshield", region, agent, plugin_id)
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "restartproxyshield",
+        "result": result,
+    }
+
+
+@app.post("/proxy-shield/{region}/{agent}/{plugin_id}/update-and-restart")
+def proxy_shield_update_and_restart(
+    region: str,
+    agent: str,
+    plugin_id: str,
+    req: ProxyShieldTargetHostRequest,
+):
+    """Proxy Shield EXEC action: updateandrestart."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call(
+        "EXEC",
+        "updateandrestart",
+        region,
+        agent,
+        plugin_id,
+        {"target_host": req.target_host},
+    )
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "updateandrestart",
+        "result": result,
     }
 
 
@@ -633,15 +1063,17 @@ def get_tunnels(
     src_port: Optional[str] = Query(None, description="The source port to filter by"),
     dst_host: Optional[str] = Query(None, description="The destination host to filter by"),
     dst_port: Optional[str] = Query(None, description="The destination port to filter by"),
+    include_agents: bool = Query(False, description="If true, include live agents and live tunnels from Cresco"),
     db: Session = Depends(get_db)
 ):
     """
-    Retrieve a list of database tunnels.
+    Retrieve a list of tunnels.
     Provide optional query parameters to filter the results.
+    Set include_agents=true to get live tunnels from Cresco stunnel plugins instead of just database records.
     """
     return build_tunnels_response(
         db, src_region, src_agent, src_plugin_id, dst_region, dst_agent,
-        src_port, dst_host, dst_port
+        src_port, dst_host, dst_port, include_agents=include_agents
     )
 
 @app.get("/tunnels/{stunnel_id}/status")
@@ -658,7 +1090,8 @@ def get_tunnel_status(
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
          
-    status = stunnel_manager.get_tunnel_status(
+    status = _run_stunnel_call(
+        stunnel_manager.get_tunnel_status,
         src_region=src_region,
         src_agent=src_agent,
         src_plugin_id=src_plugin_id,
@@ -685,7 +1118,8 @@ def get_tunnel_config(
     if not stunnel_manager:
          raise HTTPException(status_code=500, detail="Stunnel manager not initialized.")
          
-    config = stunnel_manager.get_tunnel_config(
+    config = _run_stunnel_call(
+        stunnel_manager.get_tunnel_config,
         src_region=src_region,
         src_agent=src_agent,
         src_plugin_id=src_plugin_id,
@@ -698,55 +1132,157 @@ def get_tunnel_config(
     return {"stunnel_id": stunnel_id, "config": config}
 
     
+def _remove_tunnel_background(
+    stunnel_id: str,
+    src_region: Optional[str] = None,
+    src_agent: Optional[str] = None,
+    src_plugin: Optional[str] = None,
+    dst_region: Optional[str] = None,
+    dst_agent: Optional[str] = None,
+    dst_plugin: Optional[str] = None
+) -> dict:
+    """
+    Remove a tunnel by shutting down src and dst tunnels.
+    Looks up tunnel info from database if not provided.
+    
+    Args:
+        stunnel_id: The tunnel ID to remove
+        src_region: Source region (optional, will look up from DB)
+        src_agent: Source agent (optional, will look up from DB)
+        src_plugin: Source plugin ID (optional, will look up from DB)
+        dst_region: Destination region (optional, will look up from DB)
+        dst_agent: Destination agent (optional, will look up from DB)
+        dst_plugin: Destination plugin ID (optional, will look up from DB)
+    """
+    logger.info(f"--- Removing tunnel {stunnel_id} ---")
+    
+    if not stunnel_manager:
+        logger.error("Stunnel manager not initialized!")
+        return {"stunnel_id": stunnel_id, "status": "error", "detail": "Stunnel manager not initialized"}
+    
+    # Try to get tunnel info from database if not provided
+    db = SessionLocal()
+    try:
+        db_tunnel = db.query(TunnelRecord).filter(TunnelRecord.stunnel_id == stunnel_id).first()
+        
+        # Use provided params or fall back to database record
+        final_src_region = src_region
+        final_src_agent = src_agent
+        final_src_plugin = src_plugin
+        final_dst_region = dst_region
+        final_dst_agent = dst_agent
+        final_dst_plugin = dst_plugin
+        
+        if db_tunnel:
+            logger.info(f"Found database record for tunnel {stunnel_id}")
+            if not final_src_region:
+                final_src_region = db_tunnel.src_region
+            if not final_src_agent:
+                final_src_agent = db_tunnel.src_agent
+            if not final_src_plugin:
+                final_src_plugin = db_tunnel.stunnel_plugin_id
+            if not final_dst_region:
+                final_dst_region = db_tunnel.dst_region
+            if not final_dst_agent:
+                final_dst_agent = db_tunnel.dst_agent
+            # Note: dst_plugin is not stored in database, would need to be discovered
+        
+        if not final_dst_plugin and final_dst_region and final_dst_agent:
+            final_dst_plugin = _run_stunnel_call(
+                stunnel_manager.find_existing_stunnel_plugin,
+                final_dst_region,
+                final_dst_agent,
+            )
+
+        # Use the stunnel manager's remove_tunnel method
+        if final_src_region and final_src_agent and final_src_plugin:
+            result = _run_stunnel_call(
+                stunnel_manager.remove_tunnel,
+                stunnel_id=stunnel_id,
+                src_region=final_src_region,
+                src_agent=final_src_agent,
+                src_plugin_id=final_src_plugin,
+                dst_region=final_dst_region or "",
+                dst_agent=final_dst_agent or "",
+                dst_plugin_id=final_dst_plugin or ""
+            )
+            logger.info(f"Tunnel removal result: {result}")
+        else:
+            logger.warning(f"Missing source info - cannot remove tunnel {stunnel_id}")
+            result = {
+                "stunnel_id": stunnel_id,
+                "src_removal": None,
+                "dst_removal": None,
+                "fully_removed": False,
+                "detail": "Missing source info",
+            }
+        
+        # Remove from database if exists
+        if db_tunnel:
+            logger.info(f"Deleting database record for tunnel {stunnel_id}")
+            db.delete(db_tunnel)
+            db.commit()
+            logger.info("Database record deleted.")
+        
+        logger.info("--- Tunnel removal finished ---")
+        return {
+            "stunnel_id": stunnel_id,
+            "status": "removed" if result.get("fully_removed") else "partial",
+            "details": result,
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to remove tunnel {stunnel_id} in background: {e}", exc_info=True)
+        return {"stunnel_id": stunnel_id, "status": "error", "detail": str(e)}
+    finally:
+        db.close()
+
+    
 @app.delete("/tunnels/{stunnel_id}")
 def delete_tunnel(
     stunnel_id: str,
-    db: Session = Depends(get_db)
+    src_region: Optional[str] = Query(None, description="The source region of the tunnel"),
+    src_agent: Optional[str] = Query(None, description="The source agent of the tunnel"),
+    src_plugin: Optional[str] = Query(None, description="The source stunnel plugin ID"),
+    dst_region: Optional[str] = Query(None, description="The destination region of the tunnel"),
+    dst_agent: Optional[str] = Query(None, description="The destination agent of the tunnel"),
+    dst_plugin: Optional[str] = Query(None, description="The destination stunnel plugin ID"),
 ):
     """
-    Remove a tunnel from the Cresco global controller and database by its ID.
-    Note: The stunnel_id here must correspond to the pipeline ID assigned by Cresco.
+    Delete a tunnel and wait for removal to complete before returning.
+    
+    For live tunnels, provide src_region, src_agent, src_plugin from the tunnel info.
+    For database tunnels, these will be looked up from the database record.
     """
-    logger.info(f"--- ENTERING delete_tunnel(stunnel_id='{stunnel_id}') ---")
-    if not cresco_client:
-         logger.error("Cresco client not connected!")
-         raise HTTPException(status_code=500, detail="Cresco client not connected.")
-         
-    try:
-        logger.info(f"Calling cresco_client.globalcontroller.remove_pipeline('{stunnel_id}')")
-        response = cresco_client.globalcontroller.remove_pipeline(stunnel_id)
-        logger.info(f"remove_pipeline response: {response}")
-        
-        # Optionally remove from database to keep it clean
-        logger.info("Querying local DB for tunnel record...")
-        db_tunnel = db.query(TunnelRecord).filter(
-            (TunnelRecord.stunnel_id == stunnel_id) | 
-            (TunnelRecord.stunnel_plugin_id == stunnel_id)
-        ).first()
-        
-        if db_tunnel:
-            logger.info(f"Found record in DB: stunnel_id={db_tunnel.stunnel_id}, plugin_id={db_tunnel.stunnel_plugin_id}. Deleting...")
-            dst_region = db_tunnel.dst_region
-            dst_agent = db_tunnel.dst_agent
-            db.delete(db_tunnel)
-            db.commit()
-            logger.info("DB record deleted.")
-            
-            # Restart the destination agent as requested
-            try:
-                logger.info(f"Restarting destination agent {dst_region}/{dst_agent}...")
-                cresco_client.admin.restartframework(dst_region, dst_agent)
-                logger.info("Restart command sent.")
-            except Exception as e:
-                logger.error(f"Failed to restart destination agent {dst_region}/{dst_agent}: {e}")
-        else:
-            logger.warning(f"No corresponding record found in local DB for '{stunnel_id}'.")
-            
-        logger.info("--- EXITING delete_tunnel (Success) ---")
-        return {"stunnel_id": stunnel_id, "status": "Request sent", "response": response}
-    except Exception as e:
-        logger.error(f"Failed to delete tunnel {stunnel_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete tunnel: {str(e)}")
+    logger.info(f"--- DELETE REQUEST for tunnel '{stunnel_id}' ---")
+    
+    removal_result = _remove_tunnel_background(
+        stunnel_id=stunnel_id,
+        src_region=src_region,
+        src_agent=src_agent,
+        src_plugin=src_plugin,
+        dst_region=dst_region,
+        dst_agent=dst_agent,
+        dst_plugin=dst_plugin,
+    )
+
+    if removal_result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=removal_result.get("detail", "Failed to remove tunnel"))
+
+    if removal_result.get("status") == "partial":
+        return {
+            "stunnel_id": stunnel_id,
+            "status": "partial",
+            "message": "Tunnel removal completed partially. One side may still be present.",
+            "details": removal_result.get("details"),
+        }
+
+    return {
+        "stunnel_id": stunnel_id,
+        "status": "removed",
+        "message": "Tunnel removed successfully.",
+        "details": removal_result.get("details"),
+    }
 
 
 @app.post("/agents/{region}/{agent}/restart")
@@ -759,7 +1295,7 @@ def restart_agent(region: str, agent: str):
     
     try:
         logger.info(f"Restarting agent {region}/{agent} via API...")
-        cresco_client.admin.restartframework(region, agent)
+        _run_cresco_call(cresco_client.admin.restartframework, region, agent)
         return {"message": f"Restart command sent to agent {region}/{agent}"}
     except Exception as e:
         logger.error(f"Failed to restart agent {region}/{agent}: {e}")
@@ -775,7 +1311,7 @@ def stop_agent(region: str, agent: str):
     
     try:
         logger.info(f"Stopping agent {region}/{agent} via API...")
-        cresco_client.admin.stopcontroller(region, agent)
+        _run_cresco_call(cresco_client.admin.stopcontroller, region, agent)
         return {"message": f"Stop command sent to agent {region}/{agent}"}
     except Exception as e:
         logger.error(f"Failed to stop agent {region}/{agent}: {e}")
@@ -791,7 +1327,7 @@ def get_agents():
         
     try:
         logger.info("Fetching agent list from Cresco global controller...")
-        agents = cresco_client.globalcontroller.get_agent_list()
+        agents = _run_cresco_call(cresco_client.globalcontroller.get_agent_list)
         # Ensure we return valid JSON (list of dicts typically)
         return {"agents": agents}
     except Exception as e:
@@ -803,4 +1339,3 @@ if __name__ == "__main__":
     import uvicorn
     # Running programmatically if file is executed directly
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
-

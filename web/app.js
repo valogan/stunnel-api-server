@@ -40,7 +40,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const submitBtn = document.getElementById('submitBtn');
     const formMessage = document.getElementById('formMessage');
     const refreshBtn = document.getElementById('refreshBtn');
-    const refreshAgentsBtn = document.getElementById('refreshAgentsBtn');
+    const proxyShieldForm = document.getElementById('proxyShieldForm');
+    const proxyShieldSubmitBtn = document.getElementById('proxyShieldSubmitBtn');
+    const proxyShieldMessage = document.getElementById('proxyShieldMessage');
+    const proxyAgentSelect = document.getElementById('proxy_agent_select');
+    const proxyShieldRefreshAgentsBtn = document.getElementById('proxyShieldRefreshAgentsBtn');
 
     createTunnelForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -104,23 +108,119 @@ document.addEventListener('DOMContentLoaded', () => {
         fetchTunnels();
     });
 
+    async function loadAgentsForProxyShield() {
+        if (!proxyAgentSelect) return;
+
+        proxyAgentSelect.innerHTML = '<option value="">Loading agents...</option>';
+        try {
+            const response = await fetch(`${API_URL}/agents`);
+            if (!response.ok) {
+                throw new Error('Failed to load agents');
+            }
+
+            const data = await response.json();
+            const agents = Array.isArray(data.agents) ? data.agents : [];
+
+            if (agents.length === 0) {
+                proxyAgentSelect.innerHTML = '<option value="">No agents available</option>';
+                return;
+            }
+
+            proxyAgentSelect.innerHTML = '<option value="">Select target agent</option>';
+            agents.forEach((agent) => {
+                const region = agent.region || agent.region_id || '';
+                const agentId = agent.agent || agent.agent_id || '';
+                if (!region || !agentId) return;
+
+                const option = document.createElement('option');
+                option.value = `${region}::${agentId}`;
+                option.textContent = `${region} / ${agentId}`;
+                proxyAgentSelect.appendChild(option);
+            });
+        } catch (error) {
+            console.error('Error loading agents:', error);
+            proxyAgentSelect.innerHTML = '<option value="">Failed to load agents</option>';
+        }
+    }
+
+    if (proxyShieldRefreshAgentsBtn) {
+        proxyShieldRefreshAgentsBtn.addEventListener('click', () => {
+            loadAgentsForProxyShield();
+        });
+    }
+
+    if (proxyShieldForm) {
+        proxyShieldForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            proxyShieldMessage.className = 'message hidden';
+
+            const selection = proxyAgentSelect.value || '';
+            if (!selection.includes('::')) {
+                proxyShieldMessage.textContent = 'Please select a target agent.';
+                proxyShieldMessage.className = 'message error';
+                return;
+            }
+
+            const [target_region, target_agent] = selection.split('::');
+            const payload = {
+                target_region,
+                target_agent,
+                target_host: document.getElementById('proxy_target_host').value,
+                jar_url: document.getElementById('proxy_jar_url').value,
+            };
+
+            proxyShieldSubmitBtn.disabled = true;
+            proxyShieldSubmitBtn.querySelector('.loader').classList.remove('hidden');
+
+            try {
+                const response = await fetch(`${API_URL}/proxy-shield/deploy-and-configure`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(payload),
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data);
+                    throw new Error(detail || 'Failed to deploy and configure proxy shield');
+                }
+
+                const details = data.data || {};
+                proxyShieldMessage.textContent = `Success! Pipeline: ${details.pipeline_id || 'N/A'} Plugin: ${details.plugin_id || 'N/A'}`;
+                proxyShieldMessage.className = 'message success';
+            } catch (error) {
+                console.error('Error deploying proxy shield:', error);
+                proxyShieldMessage.textContent = `Error: ${error.message}`;
+                proxyShieldMessage.className = 'message error';
+            } finally {
+                proxyShieldSubmitBtn.disabled = false;
+                proxyShieldSubmitBtn.querySelector('.loader').classList.add('hidden');
+            }
+        });
+    }
+
     // Fetch and Display Tunnels
-    // Fetch and Display Tunnels
+    // Fetch and Display Tunnels (Live from Cresco)
     async function fetchTunnels() {
         const tbody = document.getElementById('tunnelsBody');
 
         try {
-            const response = await fetch(`${API_URL}/tunnels`);
+            // Use include_agents=true to get live tunnels from Cresco stunnel plugins
+            const response = await fetch(`${API_URL}/tunnels?include_agents=true`);
             if (!response.ok) {
                 throw new Error('Failed to fetch tunnels');
             }
 
             const data = await response.json();
-            const tunnels = data.database_tunnels || [];
+            // Use live_tunnels from Cresco instead of database_tunnels
+            const tunnels = data.live_tunnels || [];
 
             if (tunnels.length === 0) {
-                // Changed colspan to account for the new column
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No tunnels found.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No live tunnels found.</td></tr>`;
                 return;
             }
 
@@ -131,78 +231,56 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Truncate IDs for display
                 const shortId = t.stunnel_id ? t.stunnel_id.substring(0, 8) + '...' : 'N/A';
 
-                // Handle stunnel_plugin_id truncation
-                const rawPluginId = t.stunnel_plugin_id || 'N/A';
+                // Handle stunnel_plugin_id truncation - use src_plugin from live tunnels
+                const rawPluginId = t.src_plugin || t._src_plugin_id || t.stunnel_plugin_id || 'N/A';
                 const shortPluginId = rawPluginId.length > 15 ? rawPluginId.substring(0, 15) + '...' : rawPluginId;
 
-                // Format Source and Destination
-                const source = `${t.src_agent} (${t.src_region}) :${t.src_port}`;
-                const dest = `${t.dst_agent} (${t.dst_region}) -> ${t.dst_host}:${t.dst_port}`;
+                // Format Source and Destination - live tunnels use src_agent/_src_agent fields
+                const srcAgent = t.src_agent || t._src_agent || 'N/A';
+                const srcRegion = t.src_region || t._src_region || 'N/A';
+                const srcPort = t.src_port || t.local_port || 'N/A';
+                const dstAgent = t.dst_agent || t.dest_agent || 'N/A';
+                const dstRegion = t.dst_region || t.dest_region || srcRegion;
+                const dstHost = t.dst_host || t.dest_host || t.remote_host || 'N/A';
+                const dstPort = t.dst_port || t.dest_port || t.remote_port || 'N/A';
+                
+                const source = `${srcAgent} (${srcRegion}) :${srcPort}`;
+                const dest = `${dstAgent} (${dstRegion}) -> ${dstHost}:${dstPort}`;
 
-                // Read live status if we fetched it (only available if live_cresco_tunnels matched)
-                let statusBadge = `<span class="status status-running">Active (DB)</span>`;
-
-                // Let's find if there is a live cresco tunnel matching our stunnel_id
-                if (data.live_cresco_tunnels && data.live_cresco_tunnels.length > 0) {
-                    const liveTunnel = data.live_cresco_tunnels.find(lt => lt.stunnel_id === t.stunnel_id);
-                    if (liveTunnel) {
-                        // The live API returns it running if it's listed.
-                        statusBadge = `<span class="status status-running">Active (Live)</span>`;
-                    } else {
-                        statusBadge = `<span class="status" style="background-color:#4a5568;">Inactive (Live)</span>`;
-                    }
-                }
+                // Live tunnels are active by definition (they're running)
+                let statusBadge = `<span class="status status-running">Active</span>`;
 
                 tr.innerHTML = `
                     <td title="${t.stunnel_id}">${shortId}</td>
                     <td title="${rawPluginId}">${shortPluginId}</td>
                     <td>${source}</td>
                     <td>${dest}</td>
-                    <td>${t.buffer_size}</td>
+                    <td>${t.buffer_size || 'N/A'}</td>
                     <td id="status-${t.stunnel_id}">${statusBadge}</td>
                     <td>
                         <div style="display: flex; gap: 5px;">
-                            <button class="btn btn-secondary btn-sm status-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Status</button>
-                            <button class="btn btn-secondary btn-sm config-btn" data-id="${t.stunnel_id}" data-region="${t.src_region}" data-agent="${t.src_agent}" data-plugin="${t.stunnel_plugin_id}">Config</button>
-                            <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_plugin_id}">Delete</button>
+                            <button class="btn btn-secondary btn-sm status-btn" data-id="${t.stunnel_id}" data-region="${srcRegion}" data-agent="${srcAgent}" data-plugin="${rawPluginId}">Status</button>
+                            <button class="btn btn-secondary btn-sm config-btn" data-id="${t.stunnel_id}" data-region="${srcRegion}" data-agent="${srcAgent}" data-plugin="${rawPluginId}">Config</button>
+                            <button class="btn btn-danger btn-sm delete-btn" data-id="${t.stunnel_id}" data-src-region="${srcRegion}" data-src-agent="${srcAgent}" data-src-plugin="${rawPluginId}" data-dst-region="${dstRegion}" data-dst-agent="${dstAgent}" data-dst-plugin="${t.dst_plugin || ''}">Delete</button>
                         </div>
                     </td>
                 `;
                 tbody.appendChild(tr);
-
-                // Now that the row is added, asynchronously check the live status if we have the plugin ID
-                // (This avoids waiting for all status checks before rendering the table)
-                if (t.stunnel_plugin_id && t.stunnel_plugin_id !== 'null') {
-                    fetch(`${API_URL}/tunnels/${t.stunnel_id}/status?src_region=${t.src_region}&src_agent=${t.src_agent}&src_plugin_id=${t.stunnel_plugin_id}`)
-                        .then(res => {
-                            if (!res.ok) throw new Error('Status fetch failed');
-                            return res.json();
-                        })
-                        .then(statusData => {
-                            const statusCell = document.getElementById(`status-${t.stunnel_id}`);
-                            if (statusCell) {
-                                if (statusData.status === 'pluginActive') {
-                                    statusCell.innerHTML = `<span class="status status-running">Online</span>`;
-                                } else {
-                                    statusCell.innerHTML = `<span class="status" style="background-color:#4a5568;">Offline</span>`;
-                                }
-                            }
-                        })
-                        .catch(err => {
-                            const statusCell = document.getElementById(`status-${t.stunnel_id}`);
-                            if (statusCell) {
-                                statusCell.innerHTML = `<span class="status" style="background-color:#4a5568;">Offline</span>`;
-                            }
-                        });
-                }
             });
 
             // Attach event listeners for delete buttons
             document.querySelectorAll('.delete-btn').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
                     const tunnelId = e.target.getAttribute('data-id');
+                    const srcRegion = e.target.getAttribute('data-src-region');
+                    const srcAgent = e.target.getAttribute('data-src-agent');
+                    const srcPlugin = e.target.getAttribute('data-src-plugin');
+                    const dstRegion = e.target.getAttribute('data-dst-region');
+                    const dstAgent = e.target.getAttribute('data-dst-agent');
+                    const dstPlugin = e.target.getAttribute('data-dst-plugin');
+                    
                     if (confirm(`Are you sure you want to delete tunnel ${tunnelId}?`)) {
-                        await deleteTunnel(tunnelId);
+                        await deleteTunnel(tunnelId, srcRegion, srcAgent, srcPlugin, dstRegion, dstAgent, dstPlugin);
                     }
                 });
             });
@@ -286,9 +364,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     // Function to delete a tunnel
-    async function deleteTunnel(tunnelId) {
+    async function deleteTunnel(tunnelId, srcRegion, srcAgent, srcPlugin, dstRegion, dstAgent, dstPlugin) {
         try {
-            const response = await fetch(`${API_URL}/tunnels/${tunnelId}`, {
+            // Build query string with optional parameters
+            const params = new URLSearchParams();
+            if (srcRegion) params.append('src_region', srcRegion);
+            if (srcAgent) params.append('src_agent', srcAgent);
+            if (srcPlugin) params.append('src_plugin', srcPlugin);
+            if (dstRegion) params.append('dst_region', dstRegion);
+            if (dstAgent) params.append('dst_agent', dstAgent);
+            if (dstPlugin) params.append('dst_plugin', dstPlugin);
+            
+            const queryString = params.toString();
+            const url = `${API_URL}/tunnels/${tunnelId}${queryString ? '?' + queryString : ''}`;
+            
+            const response = await fetch(url, {
                 method: 'DELETE',
             });
 
@@ -306,5 +396,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Initial fetch
+    loadAgentsForProxyShield();
     fetchTunnels();
 });

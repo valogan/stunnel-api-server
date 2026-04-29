@@ -74,9 +74,39 @@
                     </form>
                 </section>
 
+                <section class="card proxy-shield">
+                    <h2>Deploy Proxy Shield</h2>
+                    <form id="proxyShieldForm">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label for="proxy_agent_select">Target Agent</label>
+                                <select id="proxy_agent_select" required>
+                                    <option value="">Loading agents...</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="proxy_target_host">Target Host</label>
+                                <input type="text" id="proxy_target_host" required placeholder="e.g., 10.10.10.10">
+                            </div>
+                            <div class="form-group">
+                                <label for="proxy_jar_url">Plugin JAR URL</label>
+                                <input type="text" id="proxy_jar_url" value="https://github.com/valogan/cresco-proxy-shield-plugin/releases/download/cresco/proxy-shield-manager-1.0-SNAPSHOT.jar" readonly>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <button type="submit" class="btn btn-primary" id="proxyShieldSubmitBtn">
+                                <span class="btn-text">Deploy + Configure Proxy Shield</span>
+                                <div class="loader hidden"></div>
+                            </button>
+                            <button type="button" class="btn btn-secondary" id="proxyShieldRefreshAgentsBtn">Refresh Agents</button>
+                        </div>
+                        <div id="proxyShieldMessage" class="message hidden"></div>
+                    </form>
+                </section>
+
                 <section class="card tunnel-list">
                     <div class="section-header">
-                        <h2>Active Tunnels</h2>
+                        <h2>Live Tunnels</h2>
                         <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
                     </div>
                     <div class="table-container">
