@@ -40,7 +40,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const submitBtn = document.getElementById('submitBtn');
     const formMessage = document.getElementById('formMessage');
     const refreshBtn = document.getElementById('refreshBtn');
-    const refreshAgentsBtn = document.getElementById('refreshAgentsBtn');
+    const proxyShieldForm = document.getElementById('proxyShieldForm');
+    const proxyShieldSubmitBtn = document.getElementById('proxyShieldSubmitBtn');
+    const proxyShieldMessage = document.getElementById('proxyShieldMessage');
+    const proxyAgentSelect = document.getElementById('proxy_agent_select');
+    const proxyShieldRefreshAgentsBtn = document.getElementById('proxyShieldRefreshAgentsBtn');
 
     createTunnelForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -103,6 +107,101 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshBtn.addEventListener('click', () => {
         fetchTunnels();
     });
+
+    async function loadAgentsForProxyShield() {
+        if (!proxyAgentSelect) return;
+
+        proxyAgentSelect.innerHTML = '<option value="">Loading agents...</option>';
+        try {
+            const response = await fetch(`${API_URL}/agents`);
+            if (!response.ok) {
+                throw new Error('Failed to load agents');
+            }
+
+            const data = await response.json();
+            const agents = Array.isArray(data.agents) ? data.agents : [];
+
+            if (agents.length === 0) {
+                proxyAgentSelect.innerHTML = '<option value="">No agents available</option>';
+                return;
+            }
+
+            proxyAgentSelect.innerHTML = '<option value="">Select target agent</option>';
+            agents.forEach((agent) => {
+                const region = agent.region || agent.region_id || '';
+                const agentId = agent.agent || agent.agent_id || '';
+                if (!region || !agentId) return;
+
+                const option = document.createElement('option');
+                option.value = `${region}::${agentId}`;
+                option.textContent = `${region} / ${agentId}`;
+                proxyAgentSelect.appendChild(option);
+            });
+        } catch (error) {
+            console.error('Error loading agents:', error);
+            proxyAgentSelect.innerHTML = '<option value="">Failed to load agents</option>';
+        }
+    }
+
+    if (proxyShieldRefreshAgentsBtn) {
+        proxyShieldRefreshAgentsBtn.addEventListener('click', () => {
+            loadAgentsForProxyShield();
+        });
+    }
+
+    if (proxyShieldForm) {
+        proxyShieldForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            proxyShieldMessage.className = 'message hidden';
+
+            const selection = proxyAgentSelect.value || '';
+            if (!selection.includes('::')) {
+                proxyShieldMessage.textContent = 'Please select a target agent.';
+                proxyShieldMessage.className = 'message error';
+                return;
+            }
+
+            const [target_region, target_agent] = selection.split('::');
+            const payload = {
+                target_region,
+                target_agent,
+                target_host: document.getElementById('proxy_target_host').value,
+                jar_url: document.getElementById('proxy_jar_url').value,
+            };
+
+            proxyShieldSubmitBtn.disabled = true;
+            proxyShieldSubmitBtn.querySelector('.loader').classList.remove('hidden');
+
+            try {
+                const response = await fetch(`${API_URL}/proxy-shield/deploy-and-configure`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(payload),
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data);
+                    throw new Error(detail || 'Failed to deploy and configure proxy shield');
+                }
+
+                const details = data.data || {};
+                proxyShieldMessage.textContent = `Success! Pipeline: ${details.pipeline_id || 'N/A'} Plugin: ${details.plugin_id || 'N/A'}`;
+                proxyShieldMessage.className = 'message success';
+            } catch (error) {
+                console.error('Error deploying proxy shield:', error);
+                proxyShieldMessage.textContent = `Error: ${error.message}`;
+                proxyShieldMessage.className = 'message error';
+            } finally {
+                proxyShieldSubmitBtn.disabled = false;
+                proxyShieldSubmitBtn.querySelector('.loader').classList.add('hidden');
+            }
+        });
+    }
 
     // Fetch and Display Tunnels
     // Fetch and Display Tunnels (Live from Cresco)
@@ -297,5 +396,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Initial fetch
+    loadAgentsForProxyShield();
     fetchTunnels();
 });

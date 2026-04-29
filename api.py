@@ -1,5 +1,6 @@
 import logging
 import configparser
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -12,6 +13,7 @@ import asyncio
 
 from pycrescolib.clientlib import clientlib
 from pycrescolib.haproxy import HAProxyDeployer
+from pycrescolib.proxy_shield import ProxyShieldDeployer
 from pycrescolib.stunnel import StunnelDirect
 from fastapi import Depends
 from sqlalchemy.orm import Session
@@ -511,6 +513,23 @@ class LoadBalancedTunnelRequest(BaseModel):
     dst_agent: str
     destinations: list[str]
     buffer_size: str = "1024"
+
+
+class ProxyShieldDeployRequest(BaseModel):
+    target_region: str
+    target_agent: str
+    jar_url: str = "https://github.com/valogan/cresco-proxy-shield-plugin/releases/download/cresco/proxy-shield-manager-1.0-SNAPSHOT.jar"
+
+
+class ProxyShieldTargetHostRequest(BaseModel):
+    target_host: str
+
+
+class ProxyShieldDeployAndConfigureRequest(BaseModel):
+    target_region: str
+    target_agent: str
+    target_host: str
+    jar_url: str = "https://github.com/valogan/cresco-proxy-shield-plugin/releases/download/cresco/proxy-shield-manager-1.0-SNAPSHOT.jar"
 # --- Endpoints ---
 
 @app.get("/")
@@ -777,6 +796,225 @@ backend tunnel_backend
             "haproxy_pipeline": pipeline_id,
             "haproxy_plugin": plugin_id
         }
+    }
+
+
+@app.post("/proxy-shield/deploy")
+def deploy_proxy_shield_plugin(req: ProxyShieldDeployRequest):
+    """
+    Deploy the proxy shield plugin to a target region/agent.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    deployer = ProxyShieldDeployer(cresco_client, logger)
+    pipeline_id = deployer.deploy_proxy_shield_plugin(req.target_region, req.target_agent, req.jar_url)
+
+    if not pipeline_id:
+        raise HTTPException(status_code=500, detail="Failed to deploy proxy shield plugin.")
+
+    pipeline_config = _run_cresco_call(cresco_client.globalcontroller.get_pipeline_info, pipeline_id)
+    plugin_id = None
+    if pipeline_config and pipeline_config.get("nodes"):
+        plugin_id = pipeline_config["nodes"][0].get("node_id")
+
+    return {
+        "message": "Proxy shield plugin deployed successfully.",
+        "data": {
+            "pipeline_id": pipeline_id,
+            "plugin_id": plugin_id,
+            "target_region": req.target_region,
+            "target_agent": req.target_agent,
+            "jar_url": req.jar_url,
+        },
+    }
+
+
+@app.post("/proxy-shield/deploy-and-configure")
+def deploy_and_configure_proxy_shield(req: ProxyShieldDeployAndConfigureRequest):
+    """
+    Deploy Proxy Shield and immediately update TARGET_HOST + restart in one call.
+    """
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    deployer = ProxyShieldDeployer(cresco_client, logger)
+    pipeline_id = deployer.deploy_proxy_shield_plugin(req.target_region, req.target_agent, req.jar_url)
+    if not pipeline_id:
+        raise HTTPException(status_code=500, detail="Failed to deploy proxy shield plugin.")
+
+    pipeline_config = _run_cresco_call(cresco_client.globalcontroller.get_pipeline_info, pipeline_id)
+    plugin_id = None
+    if pipeline_config and pipeline_config.get("nodes"):
+        plugin_id = pipeline_config["nodes"][0].get("node_id")
+
+    if not plugin_id:
+        raise HTTPException(status_code=500, detail="Proxy shield deployed but plugin_id could not be resolved.")
+
+    update_restart_result = _proxy_shield_call(
+        "EXEC",
+        "updateandrestart",
+        req.target_region,
+        req.target_agent,
+        plugin_id,
+        {"target_host": req.target_host},
+    )
+
+    action_status = update_restart_result.get("status") if isinstance(update_restart_result, dict) else None
+    if action_status not in ("10", 10):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Proxy shield deployed, but update/restart failed.",
+                "pipeline_id": pipeline_id,
+                "plugin_id": plugin_id,
+                "action_result": update_restart_result,
+            },
+        )
+
+    return {
+        "message": "Proxy shield deployed and configured successfully.",
+        "data": {
+            "pipeline_id": pipeline_id,
+            "plugin_id": plugin_id,
+            "target_region": req.target_region,
+            "target_agent": req.target_agent,
+            "target_host": req.target_host,
+            "jar_url": req.jar_url,
+            "configure_action": "updateandrestart",
+            "configure_result": update_restart_result,
+        },
+    }
+
+
+def _proxy_shield_call(event_type: str, action: str, region: str, agent: str, plugin_id: str, extra: dict | None = None):
+    """Invoke proxy-shield plugin actions using the Cresco messaging API."""
+    payload = {"action": action}
+    if extra:
+        payload.update(extra)
+
+    return _run_cresco_call(
+        cresco_client.messaging.global_plugin_msgevent,
+        True,
+        event_type,
+        payload,
+        region,
+        agent,
+        plugin_id,
+    )
+
+
+@app.get("/proxy-shield/{region}/{agent}/{plugin_id}/status")
+def proxy_shield_get_status(region: str, agent: str, plugin_id: str):
+    """Proxy Shield EXEC action: getstatus."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call("EXEC", "getstatus", region, agent, plugin_id)
+    status_info = result.get("status_info") if isinstance(result, dict) else None
+    parsed_status_info = status_info
+    if isinstance(status_info, str):
+        try:
+            parsed_status_info = json.loads(status_info)
+        except Exception:
+            parsed_status_info = status_info
+
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "getstatus",
+        "result": result,
+        "status_info": parsed_status_info,
+    }
+
+
+@app.get("/proxy-shield/{region}/{agent}/{plugin_id}/target-host")
+def proxy_shield_get_target_host(region: str, agent: str, plugin_id: str):
+    """Proxy Shield EXEC action: gettargethost."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call("EXEC", "gettargethost", region, agent, plugin_id)
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "gettargethost",
+        "result": result,
+        "target_host": result.get("target_host") if isinstance(result, dict) else None,
+    }
+
+
+@app.post("/proxy-shield/{region}/{agent}/{plugin_id}/target-host")
+def proxy_shield_update_target_host(
+    region: str,
+    agent: str,
+    plugin_id: str,
+    req: ProxyShieldTargetHostRequest,
+):
+    """Proxy Shield CONFIG action: updatetargethost."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call(
+        "CONFIG",
+        "updatetargethost",
+        region,
+        agent,
+        plugin_id,
+        {"target_host": req.target_host},
+    )
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "updatetargethost",
+        "result": result,
+    }
+
+
+@app.post("/proxy-shield/{region}/{agent}/{plugin_id}/restart")
+def proxy_shield_restart(region: str, agent: str, plugin_id: str):
+    """Proxy Shield CONFIG action: restartproxyshield."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call("CONFIG", "restartproxyshield", region, agent, plugin_id)
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "restartproxyshield",
+        "result": result,
+    }
+
+
+@app.post("/proxy-shield/{region}/{agent}/{plugin_id}/update-and-restart")
+def proxy_shield_update_and_restart(
+    region: str,
+    agent: str,
+    plugin_id: str,
+    req: ProxyShieldTargetHostRequest,
+):
+    """Proxy Shield EXEC action: updateandrestart."""
+    if not cresco_client:
+        raise HTTPException(status_code=500, detail="Cresco client not connected.")
+
+    result = _proxy_shield_call(
+        "EXEC",
+        "updateandrestart",
+        region,
+        agent,
+        plugin_id,
+        {"target_host": req.target_host},
+    )
+    return {
+        "region": region,
+        "agent": agent,
+        "plugin_id": plugin_id,
+        "action": "updateandrestart",
+        "result": result,
     }
 
 
