@@ -16,6 +16,7 @@ import concurrent.futures
 from typing import Optional, Dict, Any
 
 import websockets
+from websockets.protocol import State
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -138,6 +139,14 @@ class ws_interface:
         logger.info(f"Connecting to {self.url}")
 
         try:
+            if self.ws is not None:
+                try:
+                    await asyncio.wait_for(self.ws.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self.ws = None
+                self._connected = False
+
             # Configure SSL
             ssl_context = None
             if self.url.startswith('wss://'):
@@ -194,7 +203,12 @@ class ws_interface:
 
     def connected(self):
         """Check if connected to the WebSocket server."""
-        return self._connected and self.ws is not None and not self._shutdown_flag
+        if not self._connected or self.ws is None or self._shutdown_flag:
+            return False
+        try:
+            return self.ws.state is State.OPEN
+        except Exception:
+            return False
 
     async def close_async(self):
         """Close the WebSocket connection asynchronously."""
