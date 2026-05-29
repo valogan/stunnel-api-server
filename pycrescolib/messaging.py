@@ -571,6 +571,10 @@ class messaging_sync(messaging):
         """Reset the connection state flag."""
         with self._operation_lock:
             self._failed_connection = False
+            try:
+                self.ws_interface._connected = False
+            except Exception:
+                pass
             logger.info("Connection state reset")
 
     def close(self):
